@@ -1,0 +1,9 @@
+{application,forms,
+             [{description,"Toolbox that simplifies working with Erlang's abstract format"},
+              {vsn,"0.0.1"},
+              {registered,[]},
+              {modules,[forms,forms_pt]},
+              {applications,[kernel,stdlib]},
+              {maintainers,["Enrique Fernandez"]},
+              {licenses,["MIT"]},
+              {links,[{"Github","https://github.com/efcasado/forms"}]}]}.

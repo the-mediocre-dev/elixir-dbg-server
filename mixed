@@ -1,0 +1,21 @@
+#!/usr/bin/env elixir
+
+{options, args, _invalid} = OptionParser.parse(System.argv(), strict: [node: :string])
+
+node = Keyword.get(options, :node)
+
+if(Node.self() == :nonode@nohost) do
+  Node.start(:"#{node}@127.0.0.1")
+end
+
+Process.register(self(), :eds_bootsrapper)
+Node.connect(:"elx@127.0.0.1")
+
+receive do
+  {:continue, _} ->
+    Mix.start()
+    Mix.CLI.main(args)
+
+after
+  10_000 -> raise "EDS bootstrap timeout"
+end
