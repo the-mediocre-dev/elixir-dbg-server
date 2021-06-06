@@ -8,7 +8,6 @@ defmodule EDS.Application do
 
     children = [
       EDS.MeshServer,
-      EDSWeb.Telemetry,
       {Phoenix.PubSub, name: EDS.PubSub},
       EDSWeb.Endpoint
     ]

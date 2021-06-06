@@ -15,6 +15,7 @@ defmodule EDS.Remote.Spy.Server do
     GenServer.start_link(__MODULE__, args, name: __MODULE__)
   end
 
+  @impl true
   def init(_args) do
     true = :code.unstick_mod(:error_handler)
 
@@ -52,6 +53,7 @@ defmodule EDS.Remote.Spy.Server do
     GenServer.call(__MODULE__, {:register_meta, module, meta})
   end
 
+  @impl true
   def handle_call({:load, module}, _from, %{db: db} = state) do
     module_db = :ets.new(module, [:ordered_set, :public])
 
@@ -80,6 +82,7 @@ defmodule EDS.Remote.Spy.Server do
     end
   end
 
+  @impl true
   def handle_call({:breakpoint, host, mfa}, _from, state) do
     state
     |> find_process(:host, host)
@@ -99,6 +102,7 @@ defmodule EDS.Remote.Spy.Server do
     end
   end
 
+  @impl true
   def handle_call({:fetch_module_db, module}, _from, state) do
     case :ets.lookup(state.db, {module, :refs}) do
       [{{_module, :refs}, [module_db | _]}] ->
@@ -109,6 +113,7 @@ defmodule EDS.Remote.Spy.Server do
     end
   end
 
+  @impl true
   def handle_call({:register_meta, module, meta}, _from, state) do
     with [{{_module, :refs}, [module_db | _]}] <- :ets.lookup(state.db, {module, :refs}),
          [{module_db, pids}] <- :ets.lookup(state.db, module_db) do

@@ -1,4 +1,4 @@
-# EDS Debug Server
+# Elixir Development Server
 
 Run:
 

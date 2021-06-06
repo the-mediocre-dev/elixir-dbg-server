@@ -749,13 +749,13 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp eval_expr(eval, {:local_call, line, function, args, last_call?}, bindings) do
     eval = Map.put(eval, :line, line)
-    {args, bindings} = eval_list(args, bindings, eval)
+    {args, bindings} = eval_list(eval, args, bindings)
     eval_function(eval, {eval.module, function, args}, bindings, :local, last_call?)
   end
 
   defp eval_expr(eval, {:call_remote, line, module, function, args, last_call?}, bindings) do
     eval = Map.put(eval, :line, line)
-    {args, bindings} = eval_list(args, bindings, eval)
+    {args, bindings} = eval_list(eval, args, bindings)
     eval_function(eval, {module, function, args}, bindings, :external, last_call?)
   end
 
