@@ -189,7 +189,7 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
-  defp eval_clauses(eval, [clause | _] = clauses, args, bindings) do
+  defp eval_clauses(eval, [clause | clauses], args, bindings) do
     {:clause, line, patterns, guards, body} = clause
 
     with {:match, matches} <- head_match(eval, patterns, args, [], bindings),
@@ -199,7 +199,8 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:line, line)
       |> sequence(body, bindings)
     else
-      _ -> eval_clauses(eval, clauses, args, bindings)
+      _ ->
+        eval_clauses(eval, clauses, args, bindings)
     end
   end
 

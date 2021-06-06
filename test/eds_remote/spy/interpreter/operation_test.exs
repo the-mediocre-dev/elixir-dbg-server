@@ -1,5 +1,5 @@
 defmodule EDS.Remote.Spy.Interpreter.OperationTests do
-  use EDSWeb.ConnCase, async: true
+  use EDS.DataCase, async: false
 
   alias EDS.Remote.Spy.Server
   alias EDS.Fixtures.Operations

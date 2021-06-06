@@ -3,7 +3,7 @@ defmodule EDS.DataCase do
 
   using do
     quote do
-      import EDSWeb.DataCase
+      import EDS.DataCase
     end
   end
 
