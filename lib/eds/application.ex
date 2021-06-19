@@ -3,7 +3,7 @@ defmodule EDS.Application do
 
   def start(_type, _args) do
     if(Node.self() == :nonode@nohost) do
-      Node.start(:"elx@127.0.0.1")
+      Node.start(:"eds@127.0.0.1")
     end
 
     children = [

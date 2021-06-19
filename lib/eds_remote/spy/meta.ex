@@ -1,16 +1,5 @@
-defmodule EDS.Remote.Spy.Meta.Eval do
-  defstruct level: 1,
-            line: -1,
-            module: nil,
-            function: nil,
-            args: nil,
-            error_info: [],
-            top_level: false
-end
-
 defmodule EDS.Remote.Spy.Meta do
-  alias __MODULE__.Eval
-  alias EDS.Remote.Spy.Server
+  alias EDS.Remote.Spy.{Eval, Host, Server, Stack}
 
   def start(host, {module, _, _} = mfa) do
     Process.flag(:trap_exit, true)
@@ -18,7 +7,8 @@ defmodule EDS.Remote.Spy.Meta do
     Process.put(:cache, [])
     Process.put(:host, host)
     Process.put(:stacktrace, [])
-
+    Process.put(:exit_info, :undefined)
+    Stack.init()
     Server.register_meta(module, self())
 
     send(host, {:sys, self(), eval_mfa(%Eval{}, mfa)})
@@ -33,10 +23,24 @@ defmodule EDS.Remote.Spy.Meta do
       {:sys, ^host, {:value, value, value_bindings}} ->
         {:value, value, merge_bindings(eval, value_bindings, bindings)}
 
-      {:sys, ^host, {:exception, {class, reason, stacktrace}}} ->
-        raise_exception(class, reason, stacktrace)
+      {:sys, ^host, {:exception, class, reason, stacktrace}} ->
+        case Process.get(:exit_info) do
+          :undefined ->
+            make_stack = fn depth ->
+              depth = max(0, depth - length(stacktrace))
+              stacktrace ++ Stack.delayed_stacktrace().(depth)
+            end
+
+            raise_exception(eval, class, reason, make_stack, bindings)
+
+          _ ->
+            :erlang.raise(class, reason, stacktrace)
+        end
 
       {:re_entry, ^host, {:eval, mfa}} when level === 1 ->
+        Stack.init()
+        Process.put(:exit_info, :undefined)
+        Process.put(:stacktrace, [])
         send(host, {:sys, self(), eval_mfa(eval, mfa)})
         message_loop(eval, host, bindings)
 
@@ -67,7 +71,7 @@ defmodule EDS.Remote.Spy.Meta do
 
     eval
     |> Map.update!(:level, &(&1 + 1))
-    |> Map.put(:top, true)
+    |> Map.put(:top_level, true)
     |> eval_function(mfa, bindings, :external)
     |> case do
       {:value, value, _bindings} ->
@@ -130,7 +134,13 @@ defmodule EDS.Remote.Spy.Meta do
   defp eval_function(eval, {module, name, args}, bindings, scope, last_call?) do
     case last_call? do
       false ->
-        {:value, value, _} = eval_function(eval, {module, name, args}, bindings, scope)
+        {:value, value, _} =
+          eval
+          |> Stack.push(bindings, last_call?)
+          |> eval_function({module, name, args}, bindings, scope)
+
+        Stack.pop()
+
         {:value, value, bindings}
 
       true ->
@@ -141,7 +151,7 @@ defmodule EDS.Remote.Spy.Meta do
   defp get_lambda(:eval_fun, [clauses, args, bindings, {module, name}]) do
     clauses
     |> hd()
-    |> elem(3)
+    |> elem(2)
     |> length()
     |> Kernel.===(length(args))
     |> case do
@@ -150,23 +160,23 @@ defmodule EDS.Remote.Spy.Meta do
         {clauses, module, name, args, bindings}
 
       _else ->
-        {:error, "bad arity: #{inspect({module, name, args})}"}
+        {:error, "bad eval_fun arity: #{inspect({module, name, args})}"}
     end
   end
 
-  defp get_lambda(:eval_named_fun, [clauses, args, bindings, func_name, rf, {module, name}]) do
+  defp get_lambda(:eval_named_fun, [clauses, args, bindings, fname, rf, {module, name}]) do
     clauses
     |> hd()
-    |> elem(3)
+    |> elem(2)
     |> length()
     |> Kernel.===(length(args))
     |> case do
       true ->
         Server.register_meta(module, self())
-        {clauses, module, name, args, add_binding(func_name, rf, bindings)}
+        {clauses, module, name, args, add_binding(fname, rf, bindings)}
 
       _else ->
-        {:error, "bad arity: #{inspect({module, name, args})}"}
+        {:error, "bad eval_named_fun arity: #{inspect({module, name, args})}"}
     end
   end
 
@@ -233,20 +243,20 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp match(eval, {:match, _, pattern0, pattern1}, term, matches, bindings) do
-    with {:match, matches} = match(eval, pattern0, term, matches, bindings) do
+    with {:match, matches} <- match(eval, pattern0, term, matches, bindings) do
       match(eval, pattern1, term, matches, bindings)
     end
   end
 
   defp match(eval, {:cons, _, head0, tail0}, [head1 | tail1], matches, bindings) do
-    with {:match, matches} = match(eval, head0, head1, matches, bindings) do
+    with {:match, matches} <- match(eval, head0, head1, matches, bindings) do
       match(eval, tail0, tail1, matches, bindings)
     end
   end
 
   defp match(eval, {:tuple, _, elements}, tuple, matches, bindings)
        when length(elements) === tuple_size(tuple),
-       do: match_tuple(eval, elements, tuple, 1, matches, bindings)
+       do: match_tuple(eval, elements, tuple, 0, matches, bindings)
 
   defp match(eval, {:map, _, fields}, map, matches, bindings) when is_map(map),
     do: match_map(eval, fields, map, matches, bindings)
@@ -258,11 +268,12 @@ defmodule EDS.Remote.Spy.Meta do
       matches,
       bindings,
       match_function(eval, bindings),
-      &eval_expr(&1, &2, %Eval{}),
+      &eval_expr(%Eval{}, &1, &2),
       false
     )
   catch
-    _ -> :nomatch
+    _error ->
+      :nomatch
   end
 
   defp match(_, _, _, _, _), do: :nomatch
@@ -276,7 +287,7 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp match_tuple(eval, [element | elements], tuple, index, matches, bindings) do
-    with {:match, matches} <- match(eval, element, Kernel.elem(tuple, index), matches, bindings) do
+    with {:match, matches} <- match(eval, element, elem(tuple, index), matches, bindings) do
       match_tuple(eval, elements, tuple, index + 1, matches, bindings)
     end
   end
@@ -292,7 +303,8 @@ defmodule EDS.Remote.Spy.Meta do
       _ -> :nomatch
     end
   catch
-    _ -> :nomatch
+    _error ->
+      :nomatch
   end
 
   defp match_map(_, [], _, matches, _bindings), do: {:match, matches}
@@ -520,14 +532,22 @@ defmodule EDS.Remote.Spy.Meta do
     |> Map.put(:top_level, false)
     |> eval_expr(expr, bindings)
   catch
-    :error, reason ->
-      {:value, {:EXIT, {reason, get_stacktrace()}}, bindings}
+    class, reason ->
+      value =
+        case class do
+          :error ->
+            {:EXIT, {reason, get_stacktrace()}}
 
-    :exit, reason ->
-      {:value, {:EXIT, reason}, bindings}
+          :exit ->
+            {:EXIT, reason}
 
-    :throw, reason ->
-      {:value, reason, bindings}
+          :throw ->
+            reason
+        end
+
+      Process.put(:error_info, :undefined)
+      Stack.pop(eval.level)
+      {:value, value, bindings}
   end
 
   defp eval_expr(eval, {:try, _, _, _, _, _} = expr, bindings) do
@@ -536,8 +556,8 @@ defmodule EDS.Remote.Spy.Meta do
 
     try do
       case {sequence(Map.put(eval, :top_level, false), exprs, bindings), case_clauses} do
-        {{:value, value, _bindings}, []} ->
-          value
+        {{:value, _value, _bindings} = result, []} ->
+          result
 
         {{:value, value, bindings}, _case_clauses} ->
           eval_case_clauses(eval, value, case_clauses, bindings, :try_clause)
@@ -570,17 +590,21 @@ defmodule EDS.Remote.Spy.Meta do
     do: eval_if_clauses(Map.put(eval, :line, line), clauses, bindings)
 
   defp eval_expr(eval, {:andalso, line, expr_1, expr_2} = expr, bindings) do
-    eval =
-      eval
-      |> Map.put(:top_level, false)
-      |> Map.put(:line, line)
-
-    case eval_expr(eval, expr_1, bindings) do
+    eval
+    |> Map.put(:top_level, false)
+    |> Map.put(:line, line)
+    |> eval_expr(expr_1, bindings)
+    |> case do
       {:value, false, _} = response ->
         response
 
       {:value, true, bindings} ->
-        {:value, value, _} = eval_expr(eval, expr_2, bindings)
+        {:value, value, _} =
+          eval
+          |> Map.put(:top_level, false)
+          |> Map.put(:line, line)
+          |> eval_expr(expr_2, bindings)
+
         {:value, value, bindings}
 
       _else ->
@@ -625,120 +649,61 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
-  defp eval_expr(eval, {:make_fun, line, name, [{_, _, _, args}] = clauses} = expr, bindings) do
+  defp eval_expr(eval, {:make_fun, line, name, clauses} = expr, bindings) do
+    arity =
+      clauses
+      |> hd()
+      |> elem(2)
+      |> length()
+
     eval_func = fn args ->
-      eval_mfa(eval, {__MODULE__, :eval_fun, [clauses, args, bindings, {eval.module, name}]})
+      Host.eval(__MODULE__, :eval_fun, [clauses, args, bindings, {eval.module, name}])
     end
 
-    function =
-      case length(args) do
-        0 ->
-          fn -> eval_func.([]) end
+    case :eds_utils.make_func(arity, eval_func) do
+      {:ok, function} ->
+        {:value, function, bindings}
 
-        1 ->
-          fn a -> eval_func.([a]) end
-
-        2 ->
-          fn a, b -> eval_func.([a, b]) end
-
-        3 ->
-          fn a, b, c -> eval_func.([a, b, c]) end
-
-        4 ->
-          fn a, b, c, d -> eval_func.([a, b, c, d]) end
-
-        5 ->
-          fn a, b, c, d, e -> eval_func.([a, b, c, d, e]) end
-
-        6 ->
-          fn a, b, c, d, e, f -> eval_func.([a, b, c, d, e, f]) end
-
-        7 ->
-          fn a, b, c, d, e, f, g ->
-            eval_func.([a, b, c, d, e, f, g])
-          end
-
-        8 ->
-          fn a, b, c, d, e, f, g, h ->
-            eval_func.([a, b, c, d, e, f, g, h])
-          end
-
-        9 ->
-          fn a, b, c, d, e, f, g, h, i ->
-            eval_func.([a, b, c, d, e, f, g, h, i])
-          end
-
-        10 ->
-          fn a, b, c, d, e, f, g, h, i, j ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j])
-          end
-
-        11 ->
-          fn a, b, c, d, e, f, g, h, i, j, k ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k])
-          end
-
-        12 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l])
-          end
-
-        13 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l, m ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l, m])
-          end
-
-        14 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l, m, n ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l, m, n])
-          end
-
-        15 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l, m, n, o ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l, m, n, o])
-          end
-
-        16 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p])
-          end
-
-        17 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q])
-          end
-
-        18 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r])
-          end
-
-        19 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s])
-          end
-
-        20 ->
-          fn a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t ->
-            eval_func.([a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q, r, s, t])
-          end
-
-        _else ->
-          eval
-          |> Map.put(:line, line)
-          |> exception(:error, "Arguement limit: #{expr}", bindings)
-      end
-
-    {:value, function, bindings}
+      _else ->
+        eval
+        |> Map.put(:line, line)
+        |> exception(:error, "Arguement limit: #{inspect(expr)}", bindings)
+    end
   end
 
-  defp eval_expr(eval, {:make_ext_fun, _line, mfa}, bindings) do
+  defp eval_expr(eval, {:make_named_fun, line, name, fname, clauses} = expr, bindings) do
+    arity =
+      clauses
+      |> hd()
+      |> elem(2)
+      |> length()
+
+    eval_func = fn args, rf ->
+      Host.eval(__MODULE__, :eval_named_fun, [clauses, args, bindings, fname, rf, {eval.module, name}])
+    end
+
+    case :eds_utils.make_named_func(arity, eval_func) do
+      {:ok, function} ->
+        {:value, function, bindings}
+
+      _else ->
+        eval
+        |> Map.put(:line, line)
+        |> exception(:error, "Arguement limit: #{inspect(expr)}", bindings)
+    end
+  end
+
+  defp eval_expr(eval, {:make_ext_fun, line, mfa}, bindings) do
     {[module, function, args], bindings} = eval_list(eval, mfa, bindings)
 
     try do
       {:value, :erlang.make_fun(module, function, args), bindings}
     catch
       :error, :badarg ->
+        eval
+        |> Map.put(:line, line)
+        |> Stack.push(bindings, false)
+
         eval
         |> Map.put(:line, -1)
         |> Map.put(:module, :erlang)
@@ -772,7 +737,7 @@ defmodule EDS.Remote.Spy.Meta do
       {:value, :erlang.raise(class, reason, stacktrace), bindings}
     catch
       _, _ ->
-        raise_exception(class, reason, __STACKTRACE__)
+        raise_exception(eval, class, reason, fn -> __STACKTRACE__ end, bindings)
     end
   end
 
@@ -800,6 +765,10 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:line, line)
       |> eval_list(args, bindings)
 
+    eval
+    |> Map.put(:line, line)
+    |> Stack.push(bindings, false)
+
     eval =
       eval
       |> Map.put(:module, module)
@@ -808,9 +777,21 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:line, -1)
 
     try do
-      {:value, apply(module, function, args), bindings}
+      response = apply(module, function, args)
+
+      Stack.pop()
+
+      {:value, response, bindings}
     catch
       class, reason ->
+        [{_, _, _, info} | _] = __STACKTRACE__
+
+        eval =
+          case List.keyfind(info, :error_info, 1) do
+            false -> Map.put(eval, :error_info, [])
+            error_info -> Map.put(eval, :error_info, [error_info])
+          end
+
         exception(eval, class, reason, bindings, true)
     end
   end
@@ -822,11 +803,20 @@ defmodule EDS.Remote.Spy.Meta do
       |> eval_list(args, bindings)
 
     eval
-    |> Map.put(:module, module)
-    |> Map.put(:function, module)
-    |> Map.put(:args, args)
-    |> Map.put(:line, -1)
-    |> host_cmd({:apply, {module, function, args}}, bindings)
+    |> Map.put(:line, line)
+    |> Stack.push(bindings, false)
+
+    response =
+      eval
+      |> Map.put(:module, module)
+      |> Map.put(:function, module)
+      |> Map.put(:args, args)
+      |> Map.put(:line, -1)
+      |> host_cmd({:apply, {module, function, args}}, bindings)
+
+    Stack.pop()
+
+    response
   end
 
   defp eval_expr(eval, {:op, line, op, args}, bindings) do
@@ -891,7 +881,7 @@ defmodule EDS.Remote.Spy.Meta do
       |> eval_expr(to, bindings)
 
     valid_timeout? = fn
-      x when is_integer(x) and x > 0 -> true
+      x when is_integer(x) and x >= 0 -> true
       :ininity -> true
       _else -> false
     end
@@ -933,31 +923,34 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp eval_expr(eval, {:bin, line, fields}, bindings) do
-    :eval_bits.expr_grp(
-      fields,
-      bindings,
-      fn expr, bindings ->
-        eval
-        |> Map.put(:line, line)
-        |> Map.put(:top_level, false)
-        |> eval_expr(expr, bindings)
-      end,
-      [],
-      false
-    )
-  catch
-    class, reason ->
-      exception(eval, bindings, class, reason)
+    eval =
+      eval
+      |> Map.put(:line, line)
+      |> Map.put(:top_level, false)
+
+    try do
+      :eval_bits.expr_grp(
+        fields,
+        bindings,
+        &eval_expr(eval, &1, &2),
+        [],
+        false
+      )
+    catch
+      class, reason ->
+        exception(eval, class, reason, bindings)
+    end
   end
 
-  defp eval_expr(eval, {:lc, _line, expr, qualifier}, bindings),
-    do: eval_lc(eval, expr, qualifier, bindings)
+  defp eval_expr(eval, {:lc, _line, expr, qualifier}, bindings) do
+    eval_lc(eval, expr, qualifier, bindings)
+  end
 
   defp eval_expr(eval, {:bc, _line, expr, qualifier}, bindings),
     do: eval_bc(eval, expr, qualifier, bindings)
 
   defp eval_expr(eval, exp, bindings),
-    do: exception(eval, bindings, :error, "Unknown expression: #{inspect(exp)}")
+    do: exception(eval, :error, "Unknown expression: #{inspect(exp)}", bindings)
 
   defp eval_list(eval, elements, bindings) do
     eval
@@ -1010,7 +1003,7 @@ defmodule EDS.Remote.Spy.Meta do
     values =
       values
       |> Enum.reverse()
-      |> Enum.map_reduce(%{}, fn {key, value}, acc ->
+      |> Enum.reduce(%{}, fn {key, value}, acc ->
         Map.put(acc, key, value)
       end)
 
@@ -1070,6 +1063,8 @@ defmodule EDS.Remote.Spy.Meta do
       {:match, bindings} ->
         case guard(eval, guards, bindings) do
           true ->
+            Process.put(:exit_info, :undefined)
+            Stack.pop(eval.level)
             sequence(eval, body, bindings)
 
           false ->
@@ -1212,7 +1207,7 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp receive_response(eval, host, bindings) do
     receive do
-      {^host, :receive_response} ->
+      {:receive_response, ^host} ->
         true
 
       message ->
@@ -1272,7 +1267,11 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:top_level, false)
       |> eval_expr(list, bindings)
 
-    comp_func = &expand_lc(eval, expr, qualifiers, &1)
+    comp_func = fn bindings ->
+      eval
+      |> Map.put(:line, line)
+      |> expand_lc(expr, qualifiers, bindings)
+    end
 
     eval
     |> Map.put(:line, line)
@@ -1286,7 +1285,11 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:top_level, false)
       |> eval_expr(list, bindings)
 
-    comp_func = &expand_lc(eval, expr, qualifiers, &1)
+    comp_func = fn bindings ->
+      eval
+      |> Map.put(:line, line)
+      |> expand_lc(expr, qualifiers, bindings)
+    end
 
     eval
     |> Map.put(:line, line)
@@ -1341,7 +1344,11 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:top_level, false)
       |> eval_expr(list, bindings)
 
-    comp_func = &expand_bc(eval, expr, qualifiers, &1)
+    comp_func = fn bindings ->
+      eval
+      |> Map.put(:line, line)
+      |> expand_bc(expr, qualifiers, bindings)
+    end
 
     eval
     |> Map.put(:line, line)
@@ -1355,7 +1362,11 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:top_level, false)
       |> eval_expr(list, bindings)
 
-    comp_func = &expand_bc(eval, expr, qualifiers, &1)
+    comp_func = fn bindings ->
+      eval
+      |> Map.put(:line, line)
+      |> expand_bc(expr, qualifiers, bindings)
+    end
 
     eval
     |> Map.put(:line, line)
@@ -1412,7 +1423,7 @@ defmodule EDS.Remote.Spy.Meta do
   defp eval_generate(eval, term, _pattern, bindings, _comp_func),
     do: exception(eval, :error, "bad generator: #{inspect(term)}", bindings)
 
-  defp eval_b_generate(eval, <<>> = binary, pattern, bindings, comp_func) do
+  defp eval_b_generate(eval, <<_::bitstring>> = binary, pattern, bindings, comp_func) do
     match_func = match_function(eval, bindings)
     eval_func = &eval_expr(%Eval{}, &1, &2)
 
@@ -1434,7 +1445,7 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp eval_b_generate(eval, term, _pattern, bindings, _comp_func),
-    do: exception(eval, :error, "bad generator: #{inspect(term)}", bindings)
+    do: exception(eval, :error, "bad binary generator: #{inspect(term)}", bindings)
 
   defp guard(_eval, [], _bindings), do: true
 
@@ -1450,6 +1461,8 @@ defmodule EDS.Remote.Spy.Meta do
       {:value, true} -> and_guard(eval, guards, bindings)
       _ -> false
     end
+  catch
+    _, _ -> false
   end
 
   defp and_guard(_eval, [], _bindings), do: true
@@ -1623,19 +1636,40 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp check_exit_message(_eval, _message, _bindings), do: :ignore
 
-  defp exception(eval, class, reason, bindings) do
-    exception(eval, class, reason, [], bindings)
+  defp exception(eval, class, reason, bindings, include_args \\ false) do
+    raise_exception(
+      eval,
+      class,
+      reason,
+      Stack.delayed_stacktrace(eval, include_args),
+      bindings
+    )
   end
 
-  defp exception(_eval, class, reason, stacktrace, _bindings) do
-    raise_exception(class, reason, stacktrace)
+  defp raise_exception(eval, class, reason, stacktrace, bindings) do
+    stack = Stack.delayed_to_external().()
+
+    exit_info = fn ->
+      {{eval.module, eval.line}, bindings, stack}
+    end
+
+    Process.put(:exit_info, exit_info)
+    Process.put(:stacktrace, stacktrace)
+
+    :erlang.raise(class, reason, [])
   end
 
-  defp raise_exception(class, reason, stacktrace) do
-    class
-    |> :erlang.raise(reason, stacktrace)
-    |> :erlang.error()
-  end
+  def get_stacktrace() do
+    case Process.get(:stacktrace) do
+      make_stack when is_function(make_stack, 1) ->
+        depth = :erlang.system_flag(:backtrace_depth, 8)
+        :erlang.system_flag(:backtrace_depth, depth)
+        stack = make_stack.(depth)
+        Process.put(:stacktrace, stack)
+        stack
 
-  defp get_stacktrace(), do: []
+      stack when is_list(stack) ->
+        stack
+    end
+  end
 end

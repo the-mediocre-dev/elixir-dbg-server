@@ -15,14 +15,14 @@ defmodule EDS.Remote.Application do
       {:application, :eds_remote,
        [
          {:applications, [:kernel, :stdlib, :elixir, :logger, :runtime_tools]},
-         {:description, "EDS remote application"},
+         {:description, 'EDS remote application'},
          {:modules, @remote_modules},
          {:registered, []},
          {:mod, {__MODULE__, []}}
        ]}
 
     :application.load(appspec)
-    :application.ensure_all_started(:eds_remote, :permanent)
+    Application.ensure_all_started(:eds_remote, :permanent)
   end
 
   def start(_type, _args) do

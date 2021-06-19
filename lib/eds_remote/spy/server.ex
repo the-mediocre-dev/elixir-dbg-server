@@ -6,7 +6,6 @@ defmodule EDS.Remote.Spy.Server do
   use GenServer
 
   alias EDS.Remote.Spy.{
-    Host,
     Meta,
     Server.State
   }
@@ -19,7 +18,7 @@ defmodule EDS.Remote.Spy.Server do
   def init(_args) do
     true = :code.unstick_mod(:error_handler)
 
-    function = :forms.to_abstract('breakpoint(M, F, A) -> \'#{__MODULE__}\':breakpoint(M, F, A).')
+    function = :forms.to_abstract('breakpoint(M, F, A) -> \'Elixir.EDS.Remote.Spy.Host\':eval(M, F, A).')
 
     :breakpoint
     |> :meta.replace_function(3, function, :forms.read(:error_handler))
@@ -38,10 +37,13 @@ defmodule EDS.Remote.Spy.Server do
     GenServer.call(__MODULE__, {:load, module})
   end
 
-  def breakpoint(module, function, args) do
-    case GenServer.call(__MODULE__, {:breakpoint, self(), {module, function, args}}) do
-      {:ok, meta} -> Host.eval(meta)
-      _else -> raise "Failed to find meta process"
+  def get_meta!(mfa) do
+    case GenServer.call(__MODULE__, {:get_meta, self(), mfa}) do
+      {:ok, meta} ->
+        meta
+
+      _else ->
+        raise "Failed to find meta process"
     end
   end
 
@@ -83,7 +85,7 @@ defmodule EDS.Remote.Spy.Server do
   end
 
   @impl true
-  def handle_call({:breakpoint, host, mfa}, _from, state) do
+  def handle_call({:get_meta, host, mfa}, _from, state) do
     state
     |> find_process(:host, host)
     |> case do
@@ -96,7 +98,7 @@ defmodule EDS.Remote.Spy.Server do
         {:reply, {:ok, meta}, add_process(state, host, meta)}
 
       %{meta: meta} ->
-        send(meta, {:re_entry})
+        send(meta, {:re_entry, host, {:eval, mfa}})
 
         {:reply, {:ok, meta}, state}
     end
@@ -162,7 +164,7 @@ defmodule EDS.Remote.Spy.Server do
     Enum.find(processes, nil, &(Map.get(&1, type) == pid))
   end
 
-  def add_process(%{processes: processes} = state, meta, host) do
+  def add_process(%{processes: processes} = state, host, meta) do
     Map.put(state, :processes, [%{meta: meta, host: host} | processes])
   end
 end

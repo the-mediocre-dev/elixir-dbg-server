@@ -9,7 +9,7 @@ if(Node.self() == :nonode@nohost) do
 end
 
 Process.register(self(), :eds_bootsrapper)
-Node.connect(:"elx@127.0.0.1")
+Node.connect(:"eds@127.0.0.1")
 
 receive do
   {:continue, _} ->

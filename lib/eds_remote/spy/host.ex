@@ -1,15 +1,18 @@
 defmodule EDS.Remote.Spy.Host do
-  def eval(meta) do
-    meta
+  def eval(module, function, args) do
+    save_stacktrace()
+
+    {module, function, args}
+    |> EDS.Remote.Spy.Server.get_meta!()
     |> Process.monitor()
     |> message_loop()
   end
 
   def message_loop(monitor_ref) do
     receive do
-      {:sys, _meta, {:ready, {:dbg_apply, {module, function, args}}}} ->
+      {:sys, _meta, {:ready, {:dbg_apply, mfa}}} ->
         Process.demonitor(monitor_ref, [:flush])
-        apply(module, function, args)
+        apply_mfa(mfa)
 
       {:sys, _meta, {:ready, value}} ->
         Process.demonitor(monitor_ref, [:flush])
@@ -19,7 +22,7 @@ defmodule EDS.Remote.Spy.Host do
         Process.demonitor(monitor_ref, [:flush])
 
         class
-        |> :erlang.raise(exception, stacktrace)
+        |> :erlang.raise(exception, restore_stacktrace(stacktrace))
         |> :erlang.error()
 
       {:sys, meta, {:receive, message}} ->
@@ -42,21 +45,47 @@ defmodule EDS.Remote.Spy.Host do
   defp process_command(cmd) do
     try do
       case cmd do
-        {:apply, {m, f, a}} ->
-          {:value, apply(m, f, a)}
+        {:apply, mfa} ->
+          {:value, apply_mfa(mfa)}
 
         {:eval, expression, bindings} ->
           :erl_eval.expr(expression, Enum.sort(bindings))
       end
     catch
-      class, exception ->
-        {:exception, class, exception, sanitize_stacktrace(__STACKTRACE__)}
+      class, reason ->
+        {:exception, class, reason, sanitize_stacktrace(__STACKTRACE__)}
     end
   end
 
-  defp sanitize_stacktrace([]), do: []
+  defp apply_mfa({nil, function, args}), do: apply(function, args)
 
-  defp sanitize_stacktrace([frame | stack]) do
-    [frame | sanitize_stacktrace(stack)]
+  defp apply_mfa({module, function, args}), do: apply(module, function, args)
+
+  defp save_stacktrace() do
+    unless Process.get(:stacktrace) do
+      stack =
+        self()
+        |> Process.info(:current_stacktrace)
+        |> elem(1)
+        |> Enum.drop(3)
+
+      Process.put(:stacktrace, stack)
+    end
+  end
+
+  defp restore_stacktrace(error_stacktrace) do
+    depth = :erlang.system_flag(:backtrace_depth, 8)
+    :erlang.system_flag(:backtrace_depth, depth)
+
+    error_stacktrace
+    |> Kernel.++(Process.delete(:stacktrace) || [])
+    |> Enum.slice(0..(depth - 1))
+  end
+
+  defp sanitize_stacktrace(stacktrace) do
+    Enum.reject(stacktrace, fn
+      {__MODULE__, _, _, _} -> true
+      _ -> false
+    end)
   end
 end

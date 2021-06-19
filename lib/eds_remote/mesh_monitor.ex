@@ -15,7 +15,7 @@ defmodule EDS.Remote.MeshMonitor do
   end
 
   @impl true
-  def handle_info({:nodedown, :"elx@127.0.0.1"}, state) do
+  def handle_info({:nodedown, :"eds@127.0.0.1"}, state) do
     Logger.error("EDS connection lost. Aborting.")
     Logger.flush()
     System.halt()
