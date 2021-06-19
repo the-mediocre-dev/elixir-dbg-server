@@ -1,5 +1,11 @@
 defmodule EDS.Remote.Spy.Meta do
-  alias EDS.Remote.Spy.{Eval, Host, Server, Stack}
+  alias EDS.Remote.Spy.{
+    Bindings,
+    Eval,
+    Host,
+    Server,
+    Stack
+  }
 
   def start(host, {module, _, _} = mfa) do
     Process.flag(:trap_exit, true)
@@ -12,7 +18,7 @@ defmodule EDS.Remote.Spy.Meta do
     Server.register_meta(module, self())
 
     send(host, {:sys, self(), eval_mfa(%Eval{}, mfa)})
-    message_loop(%Eval{}, host, :erl_eval.new_bindings())
+    message_loop(%Eval{}, host, Bindings.new())
   end
 
   defp message_loop(%{level: level} = eval, host, bindings) do
@@ -67,12 +73,10 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp eval_mfa(%Eval{} = eval, mfa) do
-    bindings = :erl_eval.new_bindings()
-
     eval
     |> Map.update!(:level, &(&1 + 1))
     |> Map.put(:top_level, true)
-    |> eval_function(mfa, bindings, :external)
+    |> eval_function(mfa, Bindings.new(), :external)
     |> case do
       {:value, value, _bindings} ->
         {:ready, value}
@@ -118,7 +122,7 @@ defmodule EDS.Remote.Spy.Meta do
         |> Map.put(:function, function)
         |> Map.put(:args, args)
         |> Map.put(:line, line)
-        |> eval_clauses(clauses, args, :erl_eval.new_bindings())
+        |> eval_clauses(clauses, args, Bindings.new())
 
       :not_interpreted when top_level ->
         {:value, {:dbg_apply, mfa}, bindings}
@@ -148,6 +152,36 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
+  defp get_function({module, function, args}, :local) do
+    module
+    |> Server.fetch_module_db()
+    |> :ets.match_object({{module, function, length(args), :_}, :_})
+    |> case do
+      [{{_module, _function, _arity, _exp}, clauses}] ->
+        {:ok, clauses}
+
+      _else ->
+        nil
+    end
+  end
+
+  defp get_function({module, function, args}, :external) do
+    case Server.fetch_module_db(module) do
+      :not_found ->
+        :not_interpreted
+
+      module_db ->
+        function_lookup = :ets.lookup(module_db, {module, function, length(args), true})
+        module_lookup = :ets.lookup(module_db, module)
+
+        case {function_lookup, module_lookup} do
+          {[{_, clauses}], _} -> {:ok, clauses}
+          {_, [{_, _}]} -> nil
+          {_, _} -> :not_interpreted
+        end
+    end
+  end
+
   defp get_lambda(:eval_fun, [clauses, args, bindings, {module, name}]) do
     clauses
     |> hd()
@@ -173,7 +207,7 @@ defmodule EDS.Remote.Spy.Meta do
     |> case do
       true ->
         Server.register_meta(module, self())
-        {clauses, module, name, args, add_binding(fname, rf, bindings)}
+        {clauses, module, name, args, Bindings.add(fname, rf, bindings)}
 
       _else ->
         {:error, "bad eval_named_fun arity: #{inspect({module, name, args})}"}
@@ -188,7 +222,7 @@ defmodule EDS.Remote.Spy.Meta do
             {clauses, module, name, args, bindings}
 
           {:env, [{{module, name}, bindings, clauses, func_name}]} ->
-            {clauses, module, name, args, add_binding(func_name, function, bindings)}
+            {clauses, module, name, args, Bindings.add(func_name, function, bindings)}
         end
 
       {{:module, __MODULE__}, _arity} ->
@@ -203,11 +237,11 @@ defmodule EDS.Remote.Spy.Meta do
     {:clause, line, patterns, guards, body} = clause
 
     with {:match, matches} <- head_match(eval, patterns, args, [], bindings),
-         bindings <- add_bindings(matches, bindings),
+         bindings <- Bindings.add(matches, bindings),
          true <- guard(eval, guards, bindings) do
       eval
       |> Map.put(:line, line)
-      |> sequence(body, bindings)
+      |> eval_exprs(body, bindings)
     else
       _ ->
         eval_clauses(eval, clauses, args, bindings)
@@ -232,10 +266,10 @@ defmodule EDS.Remote.Spy.Meta do
     do: {:match, matches}
 
   defp match(_eval, {:var, _, :_}, term, matches, _bindings),
-    do: {:match, add_anonymous(term, matches)}
+    do: {:match, Bindings.add_anonymous(term, matches)}
 
   defp match(_eval, {:var, _, name}, term, matches, _bindings) do
-    case binding(name, matches) do
+    case Bindings.find(name, matches) do
       {:value, ^term} -> {:match, matches}
       {:value, _} -> :nomatch
       :unbound -> {:match, [{name, term} | matches]}
@@ -281,8 +315,8 @@ defmodule EDS.Remote.Spy.Meta do
   defp match_function(eval, bindings) do
     fn
       :match, {l, r, matches} -> match(eval, l, r, matches, bindings)
-      :binding, {name, matches} -> binding(name, matches)
-      :add_binding, {name, value, matches} -> add_binding(name, value, matches)
+      :binding, {name, matches} -> Bindings.find(name, matches)
+      :add_binding, {name, value, matches} -> Bindings.add(name, value, matches)
     end
   end
 
@@ -309,157 +343,24 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp match_map(_, [], _, matches, _bindings), do: {:match, matches}
 
-  defp binding(name, [{name, value} | _]), do: {:value, value}
-
-  defp binding(name, [_, {name, value} | _]), do: {:value, value}
-
-  defp binding(name, [_, _, {name, value} | _]), do: {:value, value}
-
-  defp binding(name, [_, _, _, {name, value} | _]), do: {:value, value}
-
-  defp binding(name, [_, _, _, _, {name, value} | _]), do: {:value, value}
-
-  defp binding(name, [_, _, _, _, _, {name, value} | _]), do: {:value, value}
-
-  defp binding(name, [_, _, _, _, _, _ | bindings]), do: binding(name, bindings)
-
-  defp binding(name, [_, _, _, _, _ | bindings]), do: binding(name, bindings)
-
-  defp binding(name, [_, _, _, _ | bindings]), do: binding(name, bindings)
-
-  defp binding(name, [_, _, _ | bindings]), do: binding(name, bindings)
-
-  defp binding(name, [_, _ | bindings]), do: binding(name, bindings)
-
-  defp binding(name, [_ | bindings]), do: binding(name, bindings)
-
-  defp binding(_, []), do: :unbound
-
-  defp add_anonymous(value, [{:_, _} | bindings]),
-    do: [{:_, value} | bindings]
-
-  defp add_anonymous(value, [b1, {:_, _} | bindings]),
-    do: [b1, {:_, value} | bindings]
-
-  defp add_anonymous(value, [b1, b2, {:_, _} | bindings]),
-    do: [b1, b2, {:_, value} | bindings]
-
-  defp add_anonymous(value, [b1, b2, b3, {:_, _} | bindings]),
-    do: [b1, b2, b3, {:_, value} | bindings]
-
-  defp add_anonymous(value, [b1, b2, b3, b4, {:_, _} | bindings]),
-    do: [b1, b2, b3, b4, {:_, value} | bindings]
-
-  defp add_anonymous(value, [b1, b2, b3, b4, b5, {:_, _} | bindings]),
-    do: [b1, b2, b3, b4, b5, {:_, value} | bindings]
-
-  defp add_anonymous(value, [b1, b2, b3, b4, b5, b6 | bindings]),
-    do: [b1, b2, b3, b4, b5, b6 | add_anonymous(value, bindings)]
-
-  defp add_anonymous(value, [b1, b2, b3, b4, b5 | bindings]),
-    do: [b1, b2, b3, b4, b5 | add_anonymous(value, bindings)]
-
-  defp add_anonymous(value, [b1, b2, b3, b4 | bindings]),
-    do: [b1, b2, b3, b4 | add_anonymous(value, bindings)]
-
-  defp add_anonymous(value, [b1, b2, b3 | bindings]),
-    do: [b1, b2, b3 | add_anonymous(value, bindings)]
-
-  defp add_anonymous(value, [b1, b2 | bindings]),
-    do: [b1, b2 | add_anonymous(value, bindings)]
-
-  defp add_anonymous(value, [b1 | bindings]),
-    do: [b1 | add_anonymous(value, bindings)]
-
-  defp add_anonymous(value, []),
-    do: [{:_, value}]
-
-  defp add_bindings(from, []), do: from
-
-  defp add_bindings([{name, value} | from], to) do
-    add_bindings(from, add_binding(name, value, to))
-  end
-
-  defp add_bindings([], to), do: to
-
-  defp add_binding(name, value, [{name, _} | bindings]),
-    do: [{name, value} | bindings]
-
-  defp add_binding(name, value, [b1, {name, _} | bindings]),
-    do: [b1, {name, value} | bindings]
-
-  defp add_binding(name, value, [b1, b2, {name, _} | bindings]),
-    do: [b1, b2, {name, value} | bindings]
-
-  defp add_binding(name, value, [b1, b2, b3, {name, _} | bindings]),
-    do: [b1, b2, b3, {name, value} | bindings]
-
-  defp add_binding(name, value, [b1, b2, b3, b4, {name, _} | bindings]),
-    do: [b1, b2, b3, b4, {name, value} | bindings]
-
-  defp add_binding(name, value, [b1, b2, b3, b4, b5, {name, _} | bindings]),
-    do: [b1, b2, b3, b4, b5, {name, value} | bindings]
-
-  defp add_binding(name, value, [b1, b2, b3, b4, b5, b6 | bindings]),
-    do: [b1, b2, b3, b4, b5, b6 | add_binding(name, value, bindings)]
-
-  defp add_binding(name, value, [b1, b2, b3, b4, b5 | bindings]),
-    do: [b1, b2, b3, b4, b5 | add_binding(name, value, bindings)]
-
-  defp add_binding(name, value, [b1, b2, b3, b4 | bindings]),
-    do: [b1, b2, b3, b4 | add_binding(name, value, bindings)]
-
-  defp add_binding(name, value, [b1, b2, b3 | bindings]),
-    do: [b1, b2, b3 | add_binding(name, value, bindings)]
-
-  defp add_binding(name, value, [b1, b2 | bindings]),
-    do: [b1, b2 | add_binding(name, value, bindings)]
-
-  defp add_binding(name, value, [b1 | bindings]),
-    do: [b1 | add_binding(name, value, bindings)]
-
-  defp add_binding(name, value, []),
-    do: [{name, value}]
-
-  defp merge_bindings(_eval, bindings, bindings), do: bindings
-
-  defp merge_bindings(eval, [{name, variable} | bindings_1], bindings_2) do
-    case {binding(name, bindings_2), name} do
-      {{:value, ^variable}, _name} ->
-        merge_bindings(eval, bindings_1, bindings_2)
-
-      {{:value, _}, :_} ->
-        bindings_2 = List.keydelete(bindings_2, :_, 1)
-        [{name, variable} | merge_bindings(eval, bindings_1, bindings_2)]
-
-      {{:value, _}, _name} ->
-        exception(eval, :error, "badmatch: #{variable}", bindings_2)
-
-      {:unbound, _name} ->
-        [{name, variable} | merge_bindings(eval, bindings_1, bindings_2)]
-    end
-  end
-
-  defp merge_bindings(_eval, [], bindings), do: bindings
-
-  defp sequence(eval, [expr], bindings) do
+  defp eval_exprs(eval, [expr], bindings) do
     eval_expr(eval, expr, bindings)
   end
 
-  defp sequence(eval, [expr | exprs], bindings) do
+  defp eval_exprs(eval, [expr | exprs], bindings) do
     {:value, _, bindings} =
       eval
       |> Map.put(:top_level, false)
       |> eval_expr(expr, bindings)
 
-    sequence(eval, exprs, bindings)
+    eval_exprs(eval, exprs, bindings)
   end
 
-  defp sequence(_eval, [], bindings),
+  defp eval_exprs(_eval, [], bindings),
     do: {:value, true, bindings}
 
   defp eval_expr(eval, {:var, line, var}, bindings) do
-    case binding(var, bindings) do
+    case Bindings.find(var, bindings) do
       {:value, value} ->
         {:value, value, bindings}
 
@@ -524,7 +425,7 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp eval_expr(eval, {:block, line, elements}, bindings),
-    do: sequence(Map.put(eval, :line, line), elements, bindings)
+    do: eval_exprs(Map.put(eval, :line, line), elements, bindings)
 
   defp eval_expr(eval, {:catch, line, expr}, bindings) do
     eval
@@ -555,7 +456,7 @@ defmodule EDS.Remote.Spy.Meta do
     eval = Map.put(eval, :line, line)
 
     try do
-      case {sequence(Map.put(eval, :top_level, false), exprs, bindings), case_clauses} do
+      case {eval_exprs(Map.put(eval, :top_level, false), exprs, bindings), case_clauses} do
         {{:value, _value, _bindings} = result, []} ->
           result
 
@@ -569,7 +470,7 @@ defmodule EDS.Remote.Spy.Meta do
       eval
       |> Map.put(:top_level, false)
       |> Map.put(:line, line)
-      |> sequence(after_clauses, bindings)
+      |> eval_exprs(after_clauses, bindings)
     end
   end
 
@@ -942,12 +843,18 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
-  defp eval_expr(eval, {:lc, _line, expr, qualifier}, bindings) do
-    eval_lc(eval, expr, qualifier, bindings)
+  defp eval_expr(eval, {:lc, _line, expr, qualifiers}, bindings) do
+    {:value, eval_list_comprehension(eval, expr, qualifiers, bindings), bindings}
   end
 
-  defp eval_expr(eval, {:bc, _line, expr, qualifier}, bindings),
-    do: eval_bc(eval, expr, qualifier, bindings)
+  defp eval_expr(eval, {:bc, _line, expr, qualifiers}, bindings) do
+    value =
+      eval
+      |> eval_binary_comprehension(expr, qualifiers, bindings)
+      |> :erlang.list_to_bitstring()
+
+    {:value, value, bindings}
+  end
 
   defp eval_expr(eval, exp, bindings),
     do: exception(eval, :error, "Unknown expression: #{inspect(exp)}", bindings)
@@ -1027,7 +934,7 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp eval_if_clauses(eval, [{:clause, _, [], guards, body} | clauses], bindings) do
     case guard(eval, guards, bindings) do
-      true -> sequence(eval, body, bindings)
+      true -> eval_exprs(eval, body, bindings)
       false -> eval_if_clauses(eval, clauses, bindings)
     end
   end
@@ -1042,7 +949,7 @@ defmodule EDS.Remote.Spy.Meta do
       {:match, bindings} ->
         case guard(eval, guards, bindings) do
           true ->
-            sequence(eval, body, bindings)
+            eval_exprs(eval, body, bindings)
 
           false ->
             eval_case_clauses(eval, value, clauses, bindings, error)
@@ -1065,7 +972,7 @@ defmodule EDS.Remote.Spy.Meta do
           true ->
             Process.put(:exit_info, :undefined)
             Stack.pop(eval.level)
-            sequence(eval, body, bindings)
+            eval_exprs(eval, body, bindings)
 
           false ->
             eval_catch_clauses(eval, exception, clauses, bindings)
@@ -1083,40 +990,40 @@ defmodule EDS.Remote.Spy.Meta do
     :erlang.trace(host, true, [:receive])
     {_, messages} = Process.info(host, :messages)
 
-    case receive_clauses(eval, clauses, bindings, messages) do
+    case eval_receive_clauses(eval, clauses, bindings, messages) do
       :nomatch ->
-        eval_receive1(eval, host, clauses, bindings)
+        eval_next_message(eval, host, clauses, bindings)
 
       {:eval, body, bindings, message} ->
         recieve_message(eval, host, message, bindings)
-        sequence(eval, body, bindings)
+        eval_exprs(eval, body, bindings)
     end
   end
 
-  defp eval_receive1(eval, host, clauses, bindings) do
-    messages = do_receive(eval, host, bindings)
+  defp eval_next_message(eval, host, clauses, bindings) do
+    messages = recieve_messages(eval, host, bindings)
 
-    case receive_clauses(eval, clauses, bindings, messages) do
+    case eval_receive_clauses(eval, clauses, bindings, messages) do
       :nomatch ->
-        eval_receive1(eval, host, clauses, bindings)
+        eval_next_message(eval, host, clauses, bindings)
 
       {:eval, body, bindings, message} ->
         recieve_message(eval, host, message, bindings)
-        sequence(eval, body, bindings)
+        eval_exprs(eval, body, bindings)
     end
   end
 
   defp eval_receive(eval, host, clauses, {0, _, _} = to, bindings, 0, _stamp) do
     {_, messages} = Process.info(host, :messages)
 
-    case receive_clauses(eval, clauses, bindings, messages) do
+    case eval_receive_clauses(eval, clauses, bindings, messages) do
       :nomatch ->
         {_to_value, to_exprs, to_bindings} = to
-        sequence(eval, to_exprs, to_bindings)
+        eval_exprs(eval, to_exprs, to_bindings)
 
       {:eval, body, bindings, message} ->
         recieve_message_no_trace(eval, host, message, bindings)
-        sequence(eval, body, bindings)
+        eval_exprs(eval, body, bindings)
     end
   end
 
@@ -1124,7 +1031,7 @@ defmodule EDS.Remote.Spy.Meta do
     :erlang.trace(host, true, [:receive])
     {_, messages} = Process.info(host, :messages)
 
-    case receive_clauses(eval, clauses, bindings, messages) do
+    case eval_receive_clauses(eval, clauses, bindings, messages) do
       :nomatch ->
         {to_value, to_exprs, to_bindings} = to
         {stamp, to_value} = new_timeout(stamp, to_value)
@@ -1133,20 +1040,20 @@ defmodule EDS.Remote.Spy.Meta do
 
       {:eval, body, bindings, message} ->
         recieve_message(eval, host, message, bindings)
-        sequence(eval, body, bindings)
+        eval_exprs(eval, body, bindings)
     end
   end
 
   defp eval_receive(eval, host, clauses, to, bindings, _, stamp) do
     {to_value, to_exprs, to_bindings} = to
 
-    case do_receive(eval, host, to_value, stamp, bindings) do
+    case recieve_message(eval, host, to_value, stamp, bindings) do
       :timeout ->
         recieve_message(host)
-        sequence(eval, to_exprs, to_bindings)
+        eval_exprs(eval, to_exprs, to_bindings)
 
       messages ->
-        case receive_clauses(eval, clauses, bindings, messages) do
+        case eval_receive_clauses(eval, clauses, bindings, messages) do
           :nomatch ->
             {stamp, to_value} = new_timeout(stamp, to_value)
             to = {to_value, to_exprs, to_bindings}
@@ -1154,23 +1061,35 @@ defmodule EDS.Remote.Spy.Meta do
 
           {:eval, body, bindings, message} ->
             recieve_message(eval, host, message, bindings)
-            sequence(eval, body, bindings)
+            eval_exprs(eval, body, bindings)
         end
     end
   end
 
-  defp do_receive(eval, host, bindings) do
+  defp recieve_messages(eval, host, bindings) do
     receive do
       {:trace, ^host, :receive, message} ->
         [message]
 
       message ->
         check_exit_message(eval, message, bindings)
-        do_receive(eval, host, bindings)
+        recieve_messages(eval, host, bindings)
     end
   end
 
-  defp do_receive(eval, host, time, stamp, bindings) do
+  defp recieve_message(host) do
+    :erlang.trace(host, false, [:receive])
+    flush_traces(host)
+  end
+
+  defp recieve_message(eval, host, message, bindings) do
+    :erlang.trace(host, false, [:receive])
+    flush_traces(host)
+    send(host, {:sys, self(), {:receive, message}})
+    receive_response(eval, host, bindings)
+  end
+
+  defp recieve_message(eval, host, time, stamp, bindings) do
     receive do
       {:trace, ^host, :receive, message} ->
         [message]
@@ -1181,23 +1100,11 @@ defmodule EDS.Remote.Spy.Meta do
       message ->
         check_exit_message(eval, message, bindings)
         {stamp1, time1} = new_timeout(stamp, time)
-        do_receive(eval, host, time1, stamp1, bindings)
+        recieve_message(eval, host, time1, stamp1, bindings)
     after
       time ->
         :timeout
     end
-  end
-
-  defp recieve_message(eval, host, message, bindings) do
-    :erlang.trace(host, false, [:receive])
-    flush_traces(host)
-    send(host, {:sys, self(), {:receive, message}})
-    receive_response(eval, host, bindings)
-  end
-
-  defp recieve_message(host) do
-    :erlang.trace(host, false, [:receive])
-    flush_traces(host)
   end
 
   defp recieve_message_no_trace(eval, host, message, bindings) do
@@ -1216,29 +1123,19 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
-  defp flush_traces(host) do
-    receive do
-      {:trace, ^host, :receive, _} ->
-        flush_traces(host)
-    after
-      0 ->
-        true
-    end
-  end
-
-  defp receive_clauses(eval, clauses, bindings, [message | messages]) do
-    case rec_clauses(eval, clauses, bindings, message) do
+  defp eval_receive_clauses(eval, clauses, bindings, [message | messages]) do
+    case receive_message_clauses(eval, clauses, bindings, message) do
       :nomatch ->
-        receive_clauses(eval, clauses, bindings, messages)
+        eval_receive_clauses(eval, clauses, bindings, messages)
 
       {:eval, body, bindings} ->
         {:eval, body, bindings, message}
     end
   end
 
-  defp receive_clauses(_, _, _, []), do: :nomatch
+  defp eval_receive_clauses(_, _, _, []), do: :nomatch
 
-  defp rec_clauses(eval, [{:clause, _, [pattern], guards, body} | clauses], bindings, message) do
+  defp receive_message_clauses(eval, [{:clause, _, [pattern], guards, body} | clauses], bindings, message) do
     case match(eval, pattern, message, bindings) do
       {:match, bindings} ->
         case guard(eval, guards, bindings) do
@@ -1246,21 +1143,17 @@ defmodule EDS.Remote.Spy.Meta do
             {:eval, body, bindings}
 
           false ->
-            rec_clauses(eval, clauses, bindings, message)
+            receive_message_clauses(eval, clauses, bindings, message)
         end
 
       :nomatch ->
-        rec_clauses(eval, clauses, bindings, message)
+        receive_message_clauses(eval, clauses, bindings, message)
     end
   end
 
-  defp rec_clauses(_, [], _, _), do: :nomatch
+  defp receive_message_clauses(_, [], _, _), do: :nomatch
 
-  defp eval_lc(eval, expr, qualifiers, bindings) do
-    {:value, expand_lc(eval, expr, qualifiers, bindings), bindings}
-  end
-
-  defp expand_lc(eval, expr, [{:generate, line, pattern, list} | qualifiers], bindings) do
+  defp eval_list_comprehension(eval, expr, [{:generate, line, pattern, list} | qualifiers], bindings) do
     {:value, list, bindings} =
       eval
       |> Map.put(:line, line)
@@ -1270,15 +1163,15 @@ defmodule EDS.Remote.Spy.Meta do
     comp_func = fn bindings ->
       eval
       |> Map.put(:line, line)
-      |> expand_lc(expr, qualifiers, bindings)
+      |> eval_list_comprehension(expr, qualifiers, bindings)
     end
 
     eval
     |> Map.put(:line, line)
-    |> eval_generate(list, pattern, bindings, comp_func)
+    |> generate(list, pattern, bindings, comp_func)
   end
 
-  defp expand_lc(eval, expr, [{:b_generate, line, pattern, list} | qualifiers], bindings) do
+  defp eval_list_comprehension(eval, expr, [{:b_generate, line, pattern, list} | qualifiers], bindings) do
     {:value, binary, bindings} =
       eval
       |> Map.put(:line, line)
@@ -1288,28 +1181,28 @@ defmodule EDS.Remote.Spy.Meta do
     comp_func = fn bindings ->
       eval
       |> Map.put(:line, line)
-      |> expand_lc(expr, qualifiers, bindings)
+      |> eval_list_comprehension(expr, qualifiers, bindings)
     end
 
     eval
     |> Map.put(:line, line)
-    |> eval_b_generate(binary, pattern, bindings, comp_func)
+    |> binary_generate(binary, pattern, bindings, comp_func)
   end
 
-  defp expand_lc(eval, expr, [{:guard, qualifier} | qualifiers], bindings) do
+  defp eval_list_comprehension(eval, expr, [{:guard, qualifier} | qualifiers], bindings) do
     case guard(eval, qualifier, bindings) do
-      true -> expand_lc(eval, expr, qualifiers, bindings)
+      true -> eval_list_comprehension(eval, expr, qualifiers, bindings)
       false -> []
     end
   end
 
-  defp expand_lc(eval, expr, [qualifier | qualifiers], bindings) do
+  defp eval_list_comprehension(eval, expr, [qualifier | qualifiers], bindings) do
     eval
     |> Map.put(:top_level, false)
     |> eval_expr(qualifier, bindings)
     |> case do
       {:value, true, bindings} ->
-        expand_lc(eval, expr, qualifiers, bindings)
+        eval_list_comprehension(eval, expr, qualifiers, bindings)
 
       {:value, false, _bindings} ->
         []
@@ -1319,7 +1212,7 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
-  defp expand_lc(eval, expr, [], bindings) do
+  defp eval_list_comprehension(eval, expr, [], bindings) do
     {:value, value, _} =
       eval
       |> Map.put(:top_level, false)
@@ -1328,16 +1221,7 @@ defmodule EDS.Remote.Spy.Meta do
     [value]
   end
 
-  defp eval_bc(eval, expr, qualifiers, bindings) do
-    value =
-      eval
-      |> expand_bc(expr, qualifiers, bindings)
-      |> :erlang.list_to_bitstring()
-
-    {:value, value, bindings}
-  end
-
-  defp expand_bc(eval, expr, [{:generate, line, pattern, list} | qualifiers], bindings) do
+  defp eval_binary_comprehension(eval, expr, [{:generate, line, pattern, list} | qualifiers], bindings) do
     {:value, binary, bindings} =
       eval
       |> Map.put(:line, line)
@@ -1347,15 +1231,15 @@ defmodule EDS.Remote.Spy.Meta do
     comp_func = fn bindings ->
       eval
       |> Map.put(:line, line)
-      |> expand_bc(expr, qualifiers, bindings)
+      |> eval_binary_comprehension(expr, qualifiers, bindings)
     end
 
     eval
     |> Map.put(:line, line)
-    |> eval_generate(binary, pattern, bindings, comp_func)
+    |> generate(binary, pattern, bindings, comp_func)
   end
 
-  defp expand_bc(eval, expr, [{:b_generate, line, pattern, list} | qualifiers], bindings) do
+  defp eval_binary_comprehension(eval, expr, [{:b_generate, line, pattern, list} | qualifiers], bindings) do
     {:value, binary, bindings} =
       eval
       |> Map.put(:line, line)
@@ -1365,28 +1249,28 @@ defmodule EDS.Remote.Spy.Meta do
     comp_func = fn bindings ->
       eval
       |> Map.put(:line, line)
-      |> expand_bc(expr, qualifiers, bindings)
+      |> eval_binary_comprehension(expr, qualifiers, bindings)
     end
 
     eval
     |> Map.put(:line, line)
-    |> eval_b_generate(binary, pattern, bindings, comp_func)
+    |> binary_generate(binary, pattern, bindings, comp_func)
   end
 
-  defp expand_bc(eval, expr, [{:guard, qualifier} | qualifiers], bindings) do
+  defp eval_binary_comprehension(eval, expr, [{:guard, qualifier} | qualifiers], bindings) do
     case guard(eval, qualifier, bindings) do
-      true -> expand_bc(eval, expr, qualifiers, bindings)
+      true -> eval_binary_comprehension(eval, expr, qualifiers, bindings)
       false -> []
     end
   end
 
-  defp expand_bc(eval, expr, [qualifier | qualifiers], bindings) do
+  defp eval_binary_comprehension(eval, expr, [qualifier | qualifiers], bindings) do
     eval
     |> Map.put(:top_level, false)
     |> eval_expr(qualifier, bindings)
     |> case do
       {:value, true, bindings} ->
-        expand_bc(eval, expr, qualifiers, bindings)
+        eval_binary_comprehension(eval, expr, qualifiers, bindings)
 
       {:value, false, _bindings} ->
         []
@@ -1396,7 +1280,7 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
-  defp expand_bc(eval, expr, [], bindings) do
+  defp eval_binary_comprehension(eval, expr, [], bindings) do
     {:value, value, _} =
       eval
       |> Map.put(:top_level, false)
@@ -1405,46 +1289,46 @@ defmodule EDS.Remote.Spy.Meta do
     [value]
   end
 
-  defp eval_generate(eval, [value | values], pattern, bindings, comp_func) do
-    case match(eval, pattern, value, :erl_eval.new_bindings(), bindings) do
+  defp generate(eval, [value | values], pattern, bindings, comp_func) do
+    case match(eval, pattern, value, Bindings.new(), bindings) do
       {:match, match_bindings} ->
         match_bindings
-        |> add_bindings(bindings)
+        |> Bindings.add(bindings)
         |> comp_func.()
-        |> Kernel.++(eval_generate(eval, values, pattern, bindings, comp_func))
+        |> Kernel.++(generate(eval, values, pattern, bindings, comp_func))
 
       :nomatch ->
-        eval_generate(eval, values, pattern, bindings, comp_func)
+        generate(eval, values, pattern, bindings, comp_func)
     end
   end
 
-  defp eval_generate(_eval, [], _pattern, _bindings, _comp_func), do: []
+  defp generate(_eval, [], _pattern, _bindings, _comp_func), do: []
 
-  defp eval_generate(eval, term, _pattern, bindings, _comp_func),
+  defp generate(eval, term, _pattern, bindings, _comp_func),
     do: exception(eval, :error, "bad generator: #{inspect(term)}", bindings)
 
-  defp eval_b_generate(eval, <<_::bitstring>> = binary, pattern, bindings, comp_func) do
+  defp binary_generate(eval, <<_::bitstring>> = binary, pattern, bindings, comp_func) do
     match_func = match_function(eval, bindings)
     eval_func = &eval_expr(%Eval{}, &1, &2)
 
     pattern
-    |> :eval_bits.bin_gen(binary, :erl_eval.new_bindings(), bindings, match_func, eval_func)
+    |> :eval_bits.bin_gen(binary, Bindings.new(), bindings, match_func, eval_func)
     |> case do
       {:match, rest, match_bindings} ->
         match_bindings
-        |> add_bindings(bindings)
+        |> Bindings.add(bindings)
         |> comp_func.()
-        |> Kernel.++(eval_b_generate(eval, rest, pattern, bindings, comp_func))
+        |> Kernel.++(binary_generate(eval, rest, pattern, bindings, comp_func))
 
       {:nomatch, rest} ->
-        eval_b_generate(eval, rest, pattern, bindings, comp_func)
+        binary_generate(eval, rest, pattern, bindings, comp_func)
 
       :done ->
         []
     end
   end
 
-  defp eval_b_generate(eval, term, _pattern, bindings, _comp_func),
+  defp binary_generate(eval, term, _pattern, bindings, _comp_func),
     do: exception(eval, :error, "bad binary generator: #{inspect(term)}", bindings)
 
   defp guard(_eval, [], _bindings), do: true
@@ -1507,7 +1391,7 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp guard_expr(_eval, {:var, _, var}, bindings),
-    do: {:value, _} = binding(var, bindings)
+    do: {:value, _} = Bindings.find(var, bindings)
 
   defp guard_expr(_eval, {:value, _, value}, _bindings),
     do: {:value, value}
@@ -1576,36 +1460,6 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp guard_exprs(_eval, [], _bindings), do: {:values, []}
 
-  defp get_function({module, function, args}, :local) do
-    module
-    |> Server.fetch_module_db()
-    |> :ets.match_object({{module, function, length(args), :_}, :_})
-    |> case do
-      [{{_module, _function, _arity, _exp}, clauses}] ->
-        {:ok, clauses}
-
-      _else ->
-        nil
-    end
-  end
-
-  defp get_function({module, function, args}, :external) do
-    case Server.fetch_module_db(module) do
-      :not_found ->
-        :not_interpreted
-
-      module_db ->
-        function_lookup = :ets.lookup(module_db, {module, function, length(args), true})
-        module_lookup = :ets.lookup(module_db, module)
-
-        case {function_lookup, module_lookup} do
-          {[{_, clauses}], _} -> {:ok, clauses}
-          {_, [{_, _}]} -> nil
-          {_, _} -> :not_interpreted
-        end
-    end
-  end
-
   defp new_timeout(stamp, :infinity), do: {stamp, :infinity}
 
   defp new_timeout(old_stamp, old_time) do
@@ -1636,6 +1490,16 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp check_exit_message(_eval, _message, _bindings), do: :ignore
 
+  defp flush_traces(host) do
+    receive do
+      {:trace, ^host, :receive, _} ->
+        flush_traces(host)
+    after
+      0 ->
+        true
+    end
+  end
+
   defp exception(eval, class, reason, bindings, include_args \\ false) do
     raise_exception(
       eval,
@@ -1657,6 +1521,16 @@ defmodule EDS.Remote.Spy.Meta do
     Process.put(:stacktrace, stacktrace)
 
     :erlang.raise(class, reason, [])
+  end
+
+  def merge_bindings(eval, source, destination) do
+    case Bindings.merge(eval, source, destination) do
+      {:error, variable, bindings} ->
+        exception(eval, :error, "badmatch: #{variable}", bindings)
+
+      bindings ->
+        bindings
+    end
   end
 
   def get_stacktrace() do
