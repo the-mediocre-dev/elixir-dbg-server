@@ -5,13 +5,14 @@ defmodule EDS.MixProject do
     [
       app: :eds,
       version: "0.1.0",
-      elixir: "~> 1.12",
+      elixir: "~> 1.9",
       erlc_paths: elixirc_paths(Mix.env()),
       elixirc_paths: elixirc_paths(Mix.env()),
       compilers: [:phoenix] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
-      deps: deps()
+      deps: deps(),
+      xref: [exclude: [:dbg_iload]]
     ]
   end
 

@@ -1,8 +1,8 @@
 defmodule EDS.Fixtures.Errors.SharedFunctions do
   defmacro __using__(_opts) do
     quote do
-      def bif_error(atom) do
-        :erlang.atom_to_binary(atom)
+      def bif_error(binary) do
+        :erlang.binary_part(binary, 0, 1)
       end
 
       def exit_process() do
@@ -123,10 +123,10 @@ defmodule EDS.Fixtures.Errors do
   end
 
   def bif_error_non_interpreted() do
-    NonInterpreted.bif_error("")
+    NonInterpreted.bif_error(nil)
   end
 
   def bif_error_interpreted() do
-    Interpreted.bif_error("")
+    Interpreted.bif_error(nil)
   end
 end

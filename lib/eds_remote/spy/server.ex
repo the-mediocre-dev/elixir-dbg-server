@@ -5,27 +5,19 @@ end
 defmodule EDS.Remote.Spy.Server do
   use GenServer
 
+  alias EDS.Utils.Mesh
+
   alias EDS.Remote.Spy.{
     Meta,
     Server.State
   }
 
   def start_link(args) do
-    GenServer.start_link(__MODULE__, args, name: __MODULE__)
+    GenServer.start_link(__MODULE__, args, name: Mesh.spy_server(Node.self()))
   end
 
   @impl true
   def init(_args) do
-    true = :code.unstick_mod(:error_handler)
-
-    function = :forms.to_abstract('breakpoint(M, F, A) -> \'Elixir.EDS.Remote.Spy.Host\':eval(M, F, A).')
-
-    :breakpoint
-    |> :meta.replace_function(3, function, :forms.read(:error_handler))
-    |> :meta.apply_changes()
-
-    true = :code.stick_mod(:error_handler)
-
     {:ok,
      %State{
        db: :ets.new(__MODULE__, [:ordered_set, :protected]),
@@ -33,12 +25,12 @@ defmodule EDS.Remote.Spy.Server do
      }}
   end
 
-  def load(module) do
-    GenServer.call(__MODULE__, {:load, module})
+  def fetch_module_db(module) do
+    GenServer.call(Mesh.spy_server(Node.self()), {:fetch_module_db, module})
   end
 
   def get_meta!(mfa) do
-    case GenServer.call(__MODULE__, {:get_meta, self(), mfa}) do
+    case GenServer.call(Mesh.spy_server(Node.self()), {:get_meta, self(), mfa}) do
       {:ok, meta} ->
         meta
 
@@ -47,12 +39,16 @@ defmodule EDS.Remote.Spy.Server do
     end
   end
 
-  def fetch_module_db(module) do
-    GenServer.call(__MODULE__, {:fetch_module_db, module})
+  def load(module) do
+    GenServer.call(Mesh.spy_server(Node.self()), {:load, module})
   end
 
   def register_meta(module, meta) do
-    GenServer.call(__MODULE__, {:register_meta, module, meta})
+    GenServer.call(Mesh.spy_server(Node.self()), {:register_meta, module, meta})
+  end
+
+  def sync() do
+
   end
 
   @impl true

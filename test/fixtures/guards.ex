@@ -65,14 +65,6 @@ defmodule EDS.Fixtures.Guards do
 
   def is_boolean?(_), do: false
 
-  def is_exception?(exception) when is_exception(exception), do: true
-
-  def is_exception?(_), do: false
-
-  def is_exception?(exception, name) when is_exception(exception, name), do: true
-
-  def is_exception?(_, _), do: false
-
   def is_float?(a) when is_float(a), do: true
 
   def is_float?(_), do: false
@@ -97,14 +89,6 @@ defmodule EDS.Fixtures.Guards do
 
   def is_map?(_), do: false
 
-  def is_map_key?(map, key) when is_map_key(map, key), do: true
-
-  def is_map_key?(_, _), do: false
-
-  def is_map_field?(map) when map.field == true, do: true
-
-  def is_map_field?(_), do: false
-
   def is_nil?(a) when is_nil(a), do: true
 
   def is_nil?(_), do: false
@@ -124,14 +108,6 @@ defmodule EDS.Fixtures.Guards do
   def is_reference?(a) when is_reference(a), do: true
 
   def is_reference?(_), do: false
-
-  def is_struct?(struct) when is_struct(struct), do: true
-
-  def is_struct?(_), do: false
-
-  def is_struct?(struct, name) when is_struct(struct, name), do: true
-
-  def is_struct?(_, _), do: false
 
   def is_tuple?(a) when is_tuple(a), do: true
 

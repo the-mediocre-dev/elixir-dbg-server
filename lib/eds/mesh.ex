@@ -1,4 +1,4 @@
-defmodule EDS.MeshServer do
+defmodule EDS.Mesh do
   use GenServer
 
   require Logger
@@ -21,10 +21,11 @@ defmodule EDS.MeshServer do
 
   @impl true
   def handle_info({:nodeup, node}, state) do
-    {EDS.TraceProxy, node: node}
+    {EDS.Proxy, node: node}
     |> EDS.DynamicSupervisor.start_child()
     |> case do
       {:ok, pid} ->
+        Logger.info("Remote node #{node} attached")
         {:noreply, push_node(state, node, pid)}
 
       error ->
@@ -42,6 +43,7 @@ defmodule EDS.MeshServer do
     |> EDS.DynamicSupervisor.terminate_child()
     |> case do
       response when response in [:ok, {:error, :not_found}] ->
+        Logger.info("Remote node #{node} detached")
         {:noreply, pop_node(state, node)}
 
       error ->

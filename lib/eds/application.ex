@@ -7,7 +7,7 @@ defmodule EDS.Application do
     end
 
     children = [
-      EDS.MeshServer,
+      EDS.Mesh,
       {Phoenix.PubSub, name: EDS.PubSub},
       EDSWeb.Endpoint
     ]

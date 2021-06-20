@@ -111,14 +111,6 @@ defmodule EDS.Remote.Spy.Interpreter.GuardTests do
     refute Guards.is_boolean?({})
   end
 
-  test "is_exception?" do
-    assert Guards.is_exception?(%RuntimeError{})
-    assert Guards.is_exception?(%RuntimeError{}, RuntimeError)
-    refute Guards.is_exception?(%RuntimeError{}, ArgumentError)
-    refute Guards.is_exception?({})
-    refute Guards.is_exception?([], ArgumentError)
-  end
-
   test "is_float?" do
     assert Guards.is_float?(0.0)
     assert Guards.is_float?(-0.0)
@@ -152,20 +144,6 @@ defmodule EDS.Remote.Spy.Interpreter.GuardTests do
     refute Guards.is_map?({})
   end
 
-  test "is_map_key?" do
-    assert Guards.is_map_key?(%{a: :a}, :a)
-    refute Guards.is_map_key?(%{a: :a}, :b)
-    assert Guards.is_map_key?(%{"a" => "a"}, "a")
-    refute Guards.is_map_key?(%{"a" => "a"}, "b")
-    refute Guards.is_map_key?({}, :a)
-  end
-
-  test "is_map_field?" do
-    assert Guards.is_map_field?(%{field: true})
-    refute Guards.is_map_field?(%{field: false})
-    refute Guards.is_map_field?({})
-  end
-
   test "is_nil?" do
     assert Guards.is_nil?(nil)
     refute Guards.is_nil?(false)
@@ -191,14 +169,6 @@ defmodule EDS.Remote.Spy.Interpreter.GuardTests do
   test "is_reference?" do
     assert Guards.is_reference?(make_ref())
     refute Guards.is_reference?({})
-  end
-
-  test "is_struct?" do
-    assert Guards.is_struct?(%RuntimeError{})
-    assert Guards.is_struct?(%RuntimeError{}, RuntimeError)
-    refute Guards.is_struct?(%RuntimeError{}, ArgumentError)
-    refute Guards.is_struct?({})
-    refute Guards.is_struct?([], ArgumentError)
   end
 
   test "is_tuple?" do

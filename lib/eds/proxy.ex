@@ -1,10 +1,10 @@
-defmodule EDS.TraceProxy do
+defmodule EDS.Proxy do
   use GenServer
 
   alias EDS.Utils.Mesh
 
   def start_link([node: node] = args) do
-    GenServer.start_link(__MODULE__, args, name: Mesh.trace_proxy(node))
+    GenServer.start_link(__MODULE__, args, name: Mesh.proxy(node))
   end
 
   @impl true
@@ -23,7 +23,7 @@ defmodule EDS.TraceProxy do
   @impl true
   def handle_cast({:sync_request, _}, [node: node] = state) do
     node
-    |> Mesh.trace_server()
+    |> Mesh.remote_proxy()
     |> GenServer.cast({:sync, []})
 
     {:noreply, state}

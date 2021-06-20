@@ -1,9 +1,11 @@
 defmodule EDS.Remote.Spy.Host do
+  alias EDS.Remote.Spy.Server
+
   def eval(module, function, args) do
     save_stacktrace()
 
     {module, function, args}
-    |> EDS.Remote.Spy.Server.get_meta!()
+    |> Server.get_meta!()
     |> Process.monitor()
     |> message_loop()
   end
