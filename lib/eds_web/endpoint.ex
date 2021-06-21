@@ -10,8 +10,8 @@ defmodule EDSWeb.Endpoint do
     signing_salt: "HfpBZbrm"
   ]
 
-  socket "/socket", EDSWeb.UserSocket,
-    websocket: true,
+  socket "/ws", EDSWeb.Socket,
+    websocket: [path: "/trace"],
     longpoll: false
 
   # Serve at "/" the static files from "priv/static" directory.

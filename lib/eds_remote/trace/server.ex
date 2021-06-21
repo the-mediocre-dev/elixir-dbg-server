@@ -15,8 +15,8 @@ defmodule EDS.Remote.Trace.Server do
   end
 
   def sync() do
-    #:erlang.trace_pattern({:_, :_, :_}, false)
-    #:erlang.trace_pattern({List, :first, :_}, [{:_, [], [{:return_trace}]}])
+    # :erlang.trace_pattern({:_, :_, :_}, false)
+    # :erlang.trace_pattern({List, :first, :_}, [{:_, [], [{:return_trace}]}])
   end
 
   @impl true

@@ -36,7 +36,8 @@ defmodule EDS.MixProject do
       {:phoenix, "~> 1.5.9"},
       {:jason, "~> 1.0"},
       {:plug_cowboy, "~> 2.0"},
-      {:meta, "~> 0.1.3"}
+      {:meta, "~> 0.1.3"},
+      {:gun, "2.0.0-rc.2", only: :test}
     ]
   end
 

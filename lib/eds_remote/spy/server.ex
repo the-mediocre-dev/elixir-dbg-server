@@ -48,7 +48,6 @@ defmodule EDS.Remote.Spy.Server do
   end
 
   def sync() do
-
   end
 
   @impl true

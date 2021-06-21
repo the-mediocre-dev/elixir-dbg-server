@@ -8,6 +8,8 @@ defmodule EDS.DataCase do
   end
 
   setup _tags do
+    :ets.delete_all_objects(EDS.Repo)
+
     :ok
   end
 end
