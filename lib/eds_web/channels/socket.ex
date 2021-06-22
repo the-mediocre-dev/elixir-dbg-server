@@ -32,10 +32,10 @@ defmodule EDSWeb.Socket do
   end
 
   def handle_in({text, [opcode: :text]}, %{client: client} = state) do
-    with {:ok, %{op: op, command: command, mfa: mfa}} <- Jason.decode(text, keys: :atoms!),
+    with {:ok, %{node: node, op: op, command: command, mfa: mfa}} <- Jason.decode(text, keys: :atoms!),
          true <- op in ["insert", "delete"],
          true <- command in ["trace", "spy"] do
-      apply(Repo, String.to_existing_atom(op), [client, String.to_atom(command), mfa])
+      apply(Repo, String.to_existing_atom(op), [client, node, String.to_atom(command), mfa])
     end
 
     {:push, {:text, Jason.encode!(%{status: "success"})}, state}

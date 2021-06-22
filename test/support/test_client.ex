@@ -14,8 +14,8 @@ defmodule EDSWeb.TestClient do
     GenServer.call(__MODULE__, {:connect, client})
   end
 
-  def command(client, op, command, mfa) do
-    GenServer.call(__MODULE__, {:command, {client, op, command, mfa}})
+  def command(client, node, op, command, mfa) do
+    GenServer.call(__MODULE__, {:command, {client, node, op, command, mfa}})
   end
 
   def ping(client) do
@@ -23,8 +23,8 @@ defmodule EDSWeb.TestClient do
   end
 
   @impl true
-  def handle_call({:command, {client, op, command, mfa}}, _, %{clients: clients} = state) do
-    payload = Jason.encode!(%{op: op, command: command, mfa: mfa})
+  def handle_call({:command, {client, node, op, command, mfa}}, _, %{clients: clients} = state) do
+    payload = Jason.encode!(%{op: op, node: node, command: command, mfa: mfa})
 
     :gun.ws_send(clients[client].gun, clients[client].stream, {:text, payload})
 

@@ -35,28 +35,28 @@ defmodule EDSWeb.SocketTest do
   end
 
   test "insert/delete trace" do
-    test_command("client_1", :trace, "Test/test/1")
+    test_command("client_1", "node", :trace, "Test/test/1")
   end
 
   test "insert/delete spy" do
-    test_command("client_1", :spy, "Test/test/1")
+    test_command("client_1", "node", :spy, "Test/test/1")
   end
 
-  defp test_command(client, command, mfa) do
+  defp test_command(client, node, command, mfa) do
     TestClient.connect(client)
 
-    refute Repo.query(client, command, mfa)
+    refute Repo.query(client, node, command, mfa)
 
-    TestClient.command(client, :insert, command, mfa)
-
-    assert_receive {client, %{"status" => "success"}}, 100
-
-    assert Repo.query(client, command, mfa)
-
-    TestClient.command(client, :delete, command, mfa)
+    TestClient.command(client, node, :insert, command, mfa)
 
     assert_receive {client, %{"status" => "success"}}, 100
 
-    refute Repo.query(client, command, mfa)
+    assert Repo.query(client, node, command, mfa)
+
+    TestClient.command(client, node, :delete, command, mfa)
+
+    assert_receive {client, %{"status" => "success"}}, 100
+
+    refute Repo.query(client, node, command, mfa)
   end
 end
