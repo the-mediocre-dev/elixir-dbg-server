@@ -3,6 +3,8 @@ defmodule EDS.Mesh do
 
   require Logger
 
+  @dispatcher Application.get_env(:eds, :dispatcher)
+
   def start_link(args) do
     GenServer.start_link(__MODULE__, args, name: __MODULE__)
   end
@@ -26,6 +28,7 @@ defmodule EDS.Mesh do
     |> case do
       {:ok, pid} ->
         Logger.info("Remote node #{node} attached")
+        @dispatcher.node_up(node)
         {:noreply, push_node(state, node, pid)}
 
       error ->
@@ -44,14 +47,15 @@ defmodule EDS.Mesh do
     |> case do
       response when response in [:ok, {:error, :not_found}] ->
         Logger.info("Remote node #{node} detached")
-        {:noreply, pop_node(state, node)}
 
       error ->
         Logger.error("Failed to detach remote node #{node}")
         Logger.error("#{inspect(error)}")
-
-        {:noreply, state}
     end
+
+    @dispatcher.node_down(node)
+
+    {:noreply, pop_node(state, node)}
   end
 
   @impl true

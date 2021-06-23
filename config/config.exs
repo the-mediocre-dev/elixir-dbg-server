@@ -7,6 +7,9 @@
 # General application configuration
 use Mix.Config
 
+config :eds,
+  dispatcher: EDS.Dispatcher
+
 # Configures the endpoint
 config :eds, EDSWeb.Endpoint,
   url: [host: "localhost"],

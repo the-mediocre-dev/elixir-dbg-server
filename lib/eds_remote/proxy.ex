@@ -11,22 +11,40 @@ defmodule EDS.Remote.Proxy do
   def init(state) do
     :net_kernel.monitor_nodes(true)
 
-    {:ok, state, {:continue, {:cast, :sync}}}
+    {:ok, state, {:continue, :node_init}}
   end
 
   @impl true
-  def handle_continue({:cast, :sync}, state) do
+  def handle_continue(:node_init, state) do
     Node.self()
     |> Mesh.proxy()
     |> GenServer.whereis()
     |> case do
       pid when is_pid(pid) ->
-        GenServer.cast(Mesh.proxy(Node.self()), {:sync_request, []})
+        Node.self()
+        |> Mesh.proxy()
+        |> GenServer.cast({:node_init, Node.self()})
+
         {:noreply, state}
 
       _else ->
-        {:noreply, state, {:continue, {:cast, :sync}}}
+        {:noreply, state, {:continue, :node_init}}
     end
+  end
+
+  @impl true
+  def handle_cast({:node_init, %{spies: _spies, traces: traces}}, state) do
+    Node.self()
+    |> Mesh.trace_server()
+    |> GenServer.call({:insert, traces})
+
+    Node.self()
+    |> Mesh.proxy()
+    |> GenServer.cast({:node_init_ack, Node.self()})
+
+    continue()
+
+    {:noreply, state}
   end
 
   @impl true
@@ -40,15 +58,7 @@ defmodule EDS.Remote.Proxy do
     {:noreply, state}
   end
 
-  @impl true
   def handle_info(_message, state), do: {:noreply, state}
-
-  @impl true
-  def handle_cast({:sync, _}, state) do
-    continue()
-
-    {:noreply, state}
-  end
 
   defp continue() do
     if Process.whereis(:eds_bootsrapper) do
