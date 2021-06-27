@@ -79,7 +79,7 @@ defmodule EDS.Proxy do
   end
 
   def handle_cast({:node_init_ack, node}, state) do
-    @dispatcher.node_ready(node)
+    @dispatcher.node_status(node, :ready)
 
     {:noreply, state}
   end
@@ -90,26 +90,26 @@ defmodule EDS.Proxy do
     {:noreply, state}
   end
 
-  def handle_cast({:spy_event, node, {{{module, function, arity}, spy}, :entry}}, state) do
-    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", spy, :entry)
+  def handle_cast({:spy_event, node, {{{module, function, arity}, exprs}, :entry}}, state) do
+    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", exprs, :entry)
 
     {:noreply, state}
   end
 
-  def handle_cast({:spy_event, node, {{{module, function, arity}, spy}, :exit}}, state) do
-    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", spy, :exit)
+  def handle_cast({:spy_event, node, {{{module, function, arity}, exprs}, :exit}}, state) do
+    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", exprs, :exit)
 
     {:noreply, state}
   end
 
-  def handle_cast({:spy_event, node, {{{module, function, arity}, spy}, {:exception, exception}}}, state) do
-    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", spy, {:exception, exception})
+  def handle_cast({:spy_event, node, {{{module, function, arity}, exprs}, {:exception, exception}}}, state) do
+    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", exprs, {:exception, exception})
 
     {:noreply, state}
   end
 
-  def handle_cast({:spy_event, node, {{module, line}, spy}}, state) do
-    @dispatcher.spy_event(node, "#{inspect(module)}/#{line}", spy)
+  def handle_cast({:spy_event, node, {{module, line}, expr}}, state) do
+    @dispatcher.spy_event(node, "#{inspect(module)}/#{line}", expr)
 
     {:noreply, state}
   end

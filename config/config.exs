@@ -9,6 +9,7 @@ use Mix.Config
 
 config :eds,
   dispatcher: EDS.Dispatcher,
+  socket: EDS.Socket,
   spy_stack_depth: 50
 
 # Configures the endpoint

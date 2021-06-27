@@ -45,18 +45,18 @@ defmodule EDSWeb.SocketTest do
   defp test_command(client, node, command, mfa) do
     TestClient.connect(client)
 
-    refute Repo.is_debugged?(client, node, command, mfa)
+    refute [mfa] == Repo.fetch_mfas(client, node, command)
 
     TestClient.command(client, node, :insert, command, mfa)
 
     assert_receive {client, %{"status" => "success"}}, 100
 
-    assert Repo.is_debugged?(client, node, command, mfa)
+    assert [mfa] == Repo.fetch_mfas(client, node, command)
 
     TestClient.command(client, node, :delete, command, mfa)
 
     assert_receive {client, %{"status" => "success"}}, 100
 
-    refute Repo.is_debugged?(client, node, command, mfa)
+    refute [mfa] == Repo.fetch_mfas(client, node, command)
   end
 end

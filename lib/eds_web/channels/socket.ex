@@ -11,8 +11,10 @@ defmodule EDSWeb.Socket do
     }
   end
 
-  def push(client, term) do
-    Registry.dispatch(EDS.Registry, client, &for({pid, _} <- &1, do: send(pid, term)))
+  def init(%{client: client} = state) do
+    Registry.register(EDS.Registry, client, {})
+
+    {:ok, state}
   end
 
   def connect(%{params: %{"client" => client}}) do
@@ -21,13 +23,11 @@ defmodule EDSWeb.Socket do
 
   def connect(_), do: {:error, :invalid_connection}
 
-  def init(%{client: client} = state) do
-    Registry.register(EDS.Registry, client, {})
-
-    {:ok, state}
+  def push(client, term) do
+    Registry.dispatch(EDS.Registry, client, &for({pid, _} <- &1, do: send(pid, term)))
   end
 
-  def handle_control({_message, [opcode: :ping]}, state) do
+  def handle_control({_message, opcode: :ping}, state) do
     {:reply, :ok, :pong, state}
   end
 
@@ -35,7 +35,13 @@ defmodule EDSWeb.Socket do
     with {:ok, %{node: node, op: op, command: command, mfa: mfa}} <- Jason.decode(text, keys: :atoms!),
          true <- op in ["insert", "delete"],
          true <- command in ["trace", "spy"] do
-      apply(Repo, String.to_existing_atom(op), [client, node, String.to_atom(command), mfa])
+      case op do
+        "insert" ->
+          Repo.insert_mfa(client, node, String.to_atom(command), mfa)
+
+        "delete" ->
+          Repo.delete_mfa(client, node, String.to_atom(command), mfa)
+      end
     end
 
     {:push, {:text, Jason.encode!(%{status: "success"})}, state}

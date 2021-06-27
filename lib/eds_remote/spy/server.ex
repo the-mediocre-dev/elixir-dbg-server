@@ -82,7 +82,6 @@ defmodule EDS.Remote.Spy.Server do
   def handle_call({:load, module}, _from, %{code_db: code_db} = state),
     do: {:reply, load_module(module, code_db), state}
 
-  @impl true
   def handle_call({:get_meta, host, mfa}, _from, state) do
     state
     |> find_process(:host, host)
@@ -102,7 +101,6 @@ defmodule EDS.Remote.Spy.Server do
     end
   end
 
-  @impl true
   def handle_call({:fetch_module_db, module}, _from, state) do
     case :ets.lookup(state.code_db, {module, :refs}) do
       [{{_module, :refs}, [module_db | _]}] ->
@@ -113,7 +111,6 @@ defmodule EDS.Remote.Spy.Server do
     end
   end
 
-  @impl true
   def handle_call({:register_meta, module, meta}, _from, state) do
     with [{{_module, :refs}, [module_db | _]}] <- :ets.lookup(state.code_db, {module, :refs}),
          [{module_db, pids}] <- :ets.lookup(state.code_db, module_db) do
@@ -282,7 +279,7 @@ defmodule EDS.Remote.Spy.Server do
     end
   end
 
-  defp try_publish_ml({ml, _bindings} = spy, spy_db) do
+  defp try_publish_ml({ml, _epxr} = spy, spy_db) do
     case :ets.select(spy_db, [{ml, [], [:"$_"]}]) do
       [^ml] -> publish_spy(spy)
       _else -> :noop

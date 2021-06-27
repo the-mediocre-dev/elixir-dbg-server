@@ -2,6 +2,7 @@ use Mix.Config
 
 config :eds,
   dispatcher: EDS.TestDispatcher,
+  socket: EDS.TestSocket,
   spy_stack_depth: 5
 
 # We don't run a server during test. If one is required,

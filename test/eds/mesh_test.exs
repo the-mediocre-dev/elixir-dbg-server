@@ -31,7 +31,7 @@ defmodule EDS.MeshTests do
   test "initial traces" do
     node_name = node_name()
 
-    Repo.insert("client", :"#{node_name}@127.0.0.1", :trace, "List/first/1")
+    Repo.insert_mfa("client", :"#{node_name}@127.0.0.1", :trace, "List/first/1")
 
     node = start_slave(node_name)
 
@@ -79,8 +79,8 @@ defmodule EDS.MeshTests do
   test "initial spies" do
     node_name = node_name()
 
-    Repo.insert("client", :"#{node_name}@127.0.0.1", :spy, "EDS.Fixtures.Remote/27")
-    Repo.insert("client", :"#{node_name}@127.0.0.1", :spy, "EDS.Fixtures.Remote/call_remote_function/0")
+    Repo.insert_mfa("client", :"#{node_name}@127.0.0.1", :spy, "EDS.Fixtures.Remote/27")
+    Repo.insert_mfa("client", :"#{node_name}@127.0.0.1", :spy, "EDS.Fixtures.Remote/call_remote_function/0")
 
     node = start_slave(node_name)
 
@@ -154,14 +154,20 @@ defmodule EDS.MeshTests do
     assert %RuntimeError{message: "error"} = error
     assert [{EDS.Fixtures.Remote.Interpreted, :raise_exception, 0, [file: _, line: 18]} | _] = stacktrace
 
-    assert_receive {:spy_event, ^node, "EDS.Fixtures.Remote/noninterpreted_exception/0", _, {:exception, {class, reason, stacktrace}}}, 1_000
+    assert_receive {:spy_event, ^node, "EDS.Fixtures.Remote/noninterpreted_exception/0", _,
+                    {:exception, {class, reason, stacktrace}}},
+                   1_000
+
     assert :error == class
-    assert  %RuntimeError{message: "error"} == reason
+    assert %RuntimeError{message: "error"} == reason
     assert [{EDS.Fixtures.Remote.NonInterpreted, :raise_exception, 0, [file: _, line: 14]} | _] = stacktrace
 
-    assert_receive {:spy_event, ^node, "EDS.Fixtures.Remote/interpreted_exception/0", _, {:exception, {class, reason, stacktrace}}}, 1_000
+    assert_receive {:spy_event, ^node, "EDS.Fixtures.Remote/interpreted_exception/0", _,
+                    {:exception, {class, reason, stacktrace}}},
+                   1_000
+
     assert :error == class
-    assert  %RuntimeError{message: "error"} == reason
+    assert %RuntimeError{message: "error"} == reason
     assert [{EDS.Fixtures.Remote.Interpreted, :raise_exception, 0, [file: _, line: 18]} | _] = stacktrace
 
     stop_slave(node)
@@ -183,8 +189,8 @@ defmodule EDS.MeshTests do
   defp start_slave(node_name \\ node_name()) do
     {:ok, node} = :slave.start_link('127.0.0.1', node_name)
 
-    assert_receive {:node_up, ^node}, 5_000
-    assert_receive {:node_ready, ^node}, 1_000
+    assert_receive {:node_status, ^node, :up}, 5_000
+    assert_receive {:node_status, ^node, :ready}, 1_000
 
     node
   end
@@ -192,7 +198,7 @@ defmodule EDS.MeshTests do
   defp stop_slave(node) do
     :slave.stop(node)
 
-    assert_receive {:node_down, ^node}, 5_000
+    assert_receive {:node_status, ^node, :down}, 5_000
   end
 
   defp node_name() do

@@ -28,7 +28,7 @@ defmodule EDS.Mesh do
     |> case do
       {:ok, pid} ->
         Logger.info("Remote node #{node} attached")
-        @dispatcher.node_up(node)
+        @dispatcher.node_status(node, :up)
         {:noreply, push_node(state, node, pid)}
 
       error ->
@@ -53,7 +53,7 @@ defmodule EDS.Mesh do
         Logger.error("#{inspect(error)}")
     end
 
-    @dispatcher.node_down(node)
+    @dispatcher.node_status(node, :down)
 
     {:noreply, pop_node(state, node)}
   end

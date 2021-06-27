@@ -10,16 +10,12 @@ defmodule EDS.TestDispatcher do
     {:ok, pid}
   end
 
-  def node_up(node) do
-    GenServer.cast(__MODULE__, {:node_up, node})
+  def client_status(client, status) do
+    GenServer.cast(__MODULE__, {:client_status, client, status})
   end
 
-  def node_ready(node) do
-    GenServer.cast(__MODULE__, {:node_ready, node})
-  end
-
-  def node_down(node) do
-    GenServer.cast(__MODULE__, {:node_down, node})
+  def node_status(node, status) do
+    GenServer.cast(__MODULE__, {:node_status, node, status})
   end
 
   def trace_event(node, mfa, response) do
