@@ -12,10 +12,6 @@ defmodule EDS.Remote.Spy.Host do
 
   def message_loop(monitor_ref) do
     receive do
-      {:sys, _meta, {:ready, {:dbg_apply, mfa}}} ->
-        Process.demonitor(monitor_ref, [:flush])
-        apply_mfa(mfa)
-
       {:sys, _meta, {:ready, value}} ->
         Process.demonitor(monitor_ref, [:flush])
         value
@@ -84,10 +80,10 @@ defmodule EDS.Remote.Spy.Host do
     |> Enum.slice(0..(depth - 1))
   end
 
-  defp sanitize_stacktrace(stacktrace) do
-    Enum.reject(stacktrace, fn
-      {__MODULE__, _, _, _} -> true
-      _ -> false
-    end)
-  end
+  defp sanitize_stacktrace([]), do: []
+
+  defp sanitize_stacktrace([{__MODULE__, _, _, _} | _]), do: []
+
+  defp sanitize_stacktrace([frame | stack]),
+    do: [frame | sanitize_stacktrace(stack)]
 end

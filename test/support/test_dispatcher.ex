@@ -26,6 +26,14 @@ defmodule EDS.TestDispatcher do
     GenServer.cast(__MODULE__, {:trace_event, node, mfa, response})
   end
 
+  def spy_event(node, mfa, spy, status) do
+    GenServer.cast(__MODULE__, {:spy_event, node, mfa, spy, status})
+  end
+
+  def spy_event(node, ml, spy) do
+    GenServer.cast(__MODULE__, {:spy_event, node, ml, spy})
+  end
+
   @impl true
   def handle_cast(message, pid) do
     send(pid, message)

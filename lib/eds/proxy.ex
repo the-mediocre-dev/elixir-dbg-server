@@ -30,7 +30,16 @@ defmodule EDS.Proxy do
       :rpc.call(node, Mix, :env, [Mix.env()])
     end
 
-    for module <- EDS.Remote.Application.modules() do
+    modules =
+      case Mix.env() do
+        # We need to copy the test fixtures over during bootstrapping to
+        # so they are available during the boot process.
+        # Not the cleanest solution...
+        :test -> EDS.Remote.Application.modules() ++ [EDS.Fixtures.Remote]
+        _else -> EDS.Remote.Application.modules()
+      end
+
+    for module <- modules do
       {mod, bin, fun} = :code.get_object_code(module)
       :rpc.call(node, :code, :load_binary, [mod, fun, bin])
     end
@@ -49,10 +58,18 @@ defmodule EDS.Proxy do
     {:reply, :ok, state}
   end
 
+  def handle_call({:spy, op, spy}, _pid, [node: node] = state) do
+    node
+    |> Mesh.spy_server()
+    |> GenServer.call({op, [spy]})
+
+    {:reply, :ok, state}
+  end
+
   @impl true
   def handle_cast({:node_init, node}, state) do
     mfas = %{
-      spies: [],
+      spies: EDS.Repo.debugged_mfas(node, :spy),
       traces: EDS.Repo.debugged_mfas(node, :trace)
     }
 
@@ -69,6 +86,30 @@ defmodule EDS.Proxy do
 
   def handle_cast({:trace_event, node, {{module, function, arity}, response}}, state) do
     @dispatcher.trace_event(node, "#{inspect(module)}/#{function}/#{arity}", response)
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:spy_event, node, {{{module, function, arity}, spy}, :entry}}, state) do
+    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", spy, :entry)
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:spy_event, node, {{{module, function, arity}, spy}, :exit}}, state) do
+    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", spy, :exit)
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:spy_event, node, {{{module, function, arity}, spy}, {:exception, exception}}}, state) do
+    @dispatcher.spy_event(node, "#{inspect(module)}/#{function}/#{arity}", spy, {:exception, exception})
+
+    {:noreply, state}
+  end
+
+  def handle_cast({:spy_event, node, {{module, line}, spy}}, state) do
+    @dispatcher.spy_event(node, "#{inspect(module)}/#{line}", spy)
 
     {:noreply, state}
   end

@@ -8,7 +8,8 @@
 use Mix.Config
 
 config :eds,
-  dispatcher: EDS.Dispatcher
+  dispatcher: EDS.Dispatcher,
+  spy_stack_depth: 50
 
 # Configures the endpoint
 config :eds, EDSWeb.Endpoint,

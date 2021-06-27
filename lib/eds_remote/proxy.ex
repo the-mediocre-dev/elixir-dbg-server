@@ -33,10 +33,14 @@ defmodule EDS.Remote.Proxy do
   end
 
   @impl true
-  def handle_cast({:node_init, %{spies: _spies, traces: traces}}, state) do
+  def handle_cast({:node_init, %{spies: spies, traces: traces}}, state) do
     Node.self()
     |> Mesh.trace_server()
     |> GenServer.call({:insert, traces})
+
+    Node.self()
+    |> Mesh.spy_server()
+    |> GenServer.call({:insert, spies})
 
     Node.self()
     |> Mesh.proxy()

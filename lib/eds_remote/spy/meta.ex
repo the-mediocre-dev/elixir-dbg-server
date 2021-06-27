@@ -13,7 +13,7 @@ defmodule EDS.Remote.Spy.Meta do
     Process.put(:cache, [])
     Process.put(:host, host)
     Process.put(:stacktrace, [])
-    Process.put(:exit_info, :undefined)
+    Process.put(:exit_info, nil)
     Stack.init()
     Server.register_meta(module, self())
 
@@ -31,7 +31,7 @@ defmodule EDS.Remote.Spy.Meta do
 
       {:sys, ^host, {:exception, class, reason, stacktrace}} ->
         case Process.get(:exit_info) do
-          :undefined ->
+          exit_info when is_nil(exit_info) ->
             make_stack = fn depth ->
               depth = max(0, depth - length(stacktrace))
               stacktrace ++ Stack.delayed_stacktrace().(depth)
@@ -39,13 +39,13 @@ defmodule EDS.Remote.Spy.Meta do
 
             raise_exception(eval, class, reason, make_stack, bindings)
 
-          _ ->
+          _exit_info ->
             :erlang.raise(class, reason, stacktrace)
         end
 
       {:re_entry, ^host, {:eval, mfa}} when level === 1 ->
         Stack.init()
-        Process.put(:exit_info, :undefined)
+        Process.put(:exit_info, nil)
         Process.put(:stacktrace, [])
         send(host, {:sys, self(), eval_mfa(eval, mfa)})
         message_loop(eval, host, bindings)
@@ -73,11 +73,14 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp eval_mfa(%Eval{} = eval, mfa) do
-    eval
-    |> Map.update!(:level, &(&1 + 1))
-    |> Map.put(:top_level, true)
-    |> eval_function(mfa, Bindings.new(), :external)
-    |> case do
+    eval_func = fn ->
+      eval
+      |> Map.update!(:level, &(&1 + 1))
+      |> Map.put(:top_level, true)
+      |> eval_function(mfa, Bindings.new(), :external)
+    end
+
+    case spy_function(eval_func, mfa) do
       {:value, value, _bindings} ->
         {:ready, value}
     end
@@ -89,9 +92,42 @@ defmodule EDS.Remote.Spy.Meta do
       {:exception, class, reason, get_stacktrace()}
   end
 
-  defp eval_function(eval, {__MODULE__, function, args}, bindings, _scope) do
-    %{top_level: top_level} = eval
+  defp spy_function(eval_func, {module, function, args}) do
+    Server.spy_function({:entry, {module, function, length(args)}})
 
+    try do
+      result = eval_func.()
+      Server.spy_function(:exit)
+      result
+    catch
+      class, reason ->
+        Server.spy_function({:exception, {class, reason, get_stacktrace()}})
+        :erlang.raise(class, reason, get_stacktrace())
+    end
+  end
+
+  defp eval_function(eval, {module, name, args}, bindings, scope, last_call?) do
+    eval_func = fn ->
+      case last_call? do
+        false ->
+          {:value, value, _} =
+            eval
+            |> Stack.push(bindings, last_call?)
+            |> eval_function({module, name, args}, bindings, scope)
+
+          Stack.pop()
+
+          {:value, value, bindings}
+
+        true ->
+          eval_function(eval, {module, name, args}, bindings, scope)
+      end
+    end
+
+    spy_function(eval_func, {module, name, args})
+  end
+
+  defp eval_function(eval, {__MODULE__, function, args}, bindings, _scope) do
     case get_lambda(function, args) do
       {[{:clause, line, _, _, _} | _] = clauses, module, function, args, bindings} ->
         eval
@@ -101,9 +137,6 @@ defmodule EDS.Remote.Spy.Meta do
         |> Map.put(:line, line)
         |> eval_clauses(clauses, args, bindings)
 
-      :not_interpreted when top_level ->
-        {:value, {:dbg_apply, {:erlang, :apply, [function, args]}}, bindings}
-
       :not_interpreted ->
         host_cmd(eval, {:apply, {:erlang, :apply, [function, args]}}, bindings)
 
@@ -112,7 +145,7 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
-  defp eval_function(%{top_level: top_level} = eval, mfa, bindings, scope) do
+  defp eval_function(eval, mfa, bindings, scope) do
     case get_function(mfa, scope) do
       {:ok, [{:clause, line, _, _, _} | _] = clauses} ->
         {module, function, args} = mfa
@@ -124,31 +157,11 @@ defmodule EDS.Remote.Spy.Meta do
         |> Map.put(:line, line)
         |> eval_clauses(clauses, args, Bindings.new())
 
-      :not_interpreted when top_level ->
-        {:value, {:dbg_apply, mfa}, bindings}
-
       :not_interpreted ->
         host_cmd(eval, {:apply, mfa}, bindings)
 
       _ ->
         exception(eval, :error, "Undefined function: #{inspect(mfa)}", true)
-    end
-  end
-
-  defp eval_function(eval, {module, name, args}, bindings, scope, last_call?) do
-    case last_call? do
-      false ->
-        {:value, value, _} =
-          eval
-          |> Stack.push(bindings, last_call?)
-          |> eval_function({module, name, args}, bindings, scope)
-
-        Stack.pop()
-
-        {:value, value, bindings}
-
-      true ->
-        eval_function(eval, {module, name, args}, bindings, scope)
     end
   end
 
@@ -302,7 +315,7 @@ defmodule EDS.Remote.Spy.Meta do
       matches,
       bindings,
       match_function(eval, bindings),
-      &eval_expr(%Eval{}, &1, &2),
+      &spy_expr(%Eval{}, &1, &2),
       false
     )
   catch
@@ -343,21 +356,31 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp match_map(_, [], _, matches, _bindings), do: {:match, matches}
 
-  defp eval_exprs(eval, [expr], bindings) do
-    eval_expr(eval, expr, bindings)
-  end
+  defp eval_exprs(eval, [expr], bindings),
+    do: spy_expr(eval, expr, bindings)
 
   defp eval_exprs(eval, [expr | exprs], bindings) do
     {:value, _, bindings} =
       eval
       |> Map.put(:top_level, false)
-      |> eval_expr(expr, bindings)
+      |> spy_expr(expr, bindings)
 
     eval_exprs(eval, exprs, bindings)
   end
 
   defp eval_exprs(_eval, [], bindings),
     do: {:value, true, bindings}
+
+  defp spy_expr(eval, expr, bindings) when elem(expr, 0) === :value,
+    do: eval_expr(eval, expr, bindings)
+
+  defp spy_expr(eval, expr, bindings) do
+    with {:value, _value, bindings} = result <- eval_expr(eval, expr, bindings) do
+      Server.spy_expr(elem(expr, 1), bindings)
+
+      result
+    end
+  end
 
   defp eval_expr(eval, {:var, line, var}, bindings) do
     case Bindings.find(var, bindings) do
@@ -383,8 +406,8 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
 
-    {:value, head, head_bindings} = eval_expr(eval, head, bindings)
-    {:value, tail, tail_bindings} = eval_expr(eval, tail, bindings)
+    {:value, head, head_bindings} = spy_expr(eval, head, bindings)
+    {:value, tail, tail_bindings} = spy_expr(eval, tail, bindings)
     bindings = merge_bindings(eval, tail_bindings, head_bindings)
     {:value, [head | tail], bindings}
   end
@@ -400,7 +423,7 @@ defmodule EDS.Remote.Spy.Meta do
       eval
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
-      |> eval_new_map_fields(fields, bindings, &eval_expr/3)
+      |> eval_new_map_fields(fields, bindings, &spy_expr/3)
 
     {:value, map, bindings}
   end
@@ -411,7 +434,7 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
 
-    {:value, map, map_bindings} = eval_expr(eval, map, bindings)
+    {:value, map, map_bindings} = spy_expr(eval, map, bindings)
     {fields, fields_bindings} = eval_map_fields(eval, fields, bindings)
     _ = Map.put(map, :key, :value)
     bindings = merge_bindings(eval, fields_bindings, map_bindings)
@@ -431,7 +454,7 @@ defmodule EDS.Remote.Spy.Meta do
     eval
     |> Map.put(:line, line)
     |> Map.put(:top_level, false)
-    |> eval_expr(expr, bindings)
+    |> spy_expr(expr, bindings)
   catch
     class, reason ->
       value =
@@ -446,7 +469,7 @@ defmodule EDS.Remote.Spy.Meta do
             reason
         end
 
-      Process.put(:error_info, :undefined)
+      Process.put(:error_info, nil)
       Stack.pop(eval.level)
       {:value, value, bindings}
   end
@@ -478,7 +501,7 @@ defmodule EDS.Remote.Spy.Meta do
     eval
     |> Map.put(:top_level, false)
     |> Map.put(:line, line)
-    |> eval_expr(case_expr, bindings)
+    |> spy_expr(case_expr, bindings)
     |> case do
       {:value, value, bindings} ->
         eval
@@ -494,7 +517,7 @@ defmodule EDS.Remote.Spy.Meta do
     eval
     |> Map.put(:top_level, false)
     |> Map.put(:line, line)
-    |> eval_expr(expr_1, bindings)
+    |> spy_expr(expr_1, bindings)
     |> case do
       {:value, false, _} = response ->
         response
@@ -504,7 +527,7 @@ defmodule EDS.Remote.Spy.Meta do
           eval
           |> Map.put(:top_level, false)
           |> Map.put(:line, line)
-          |> eval_expr(expr_2, bindings)
+          |> spy_expr(expr_2, bindings)
 
         {:value, value, bindings}
 
@@ -519,12 +542,12 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:top_level, false)
       |> Map.put(:line, line)
 
-    case eval_expr(eval, expr_1, bindings) do
+    case spy_expr(eval, expr_1, bindings) do
       {:value, true, _} = response ->
         response
 
       {:value, false, bindings} ->
-        {:value, value, _} = eval_expr(eval, expr_2, bindings)
+        {:value, value, _} = spy_expr(eval, expr_2, bindings)
         {:value, value, bindings}
 
       _else ->
@@ -537,7 +560,7 @@ defmodule EDS.Remote.Spy.Meta do
       eval
       |> Map.put(:top_level, false)
       |> Map.put(:line, line)
-      |> eval_expr(right, bindings)
+      |> spy_expr(right, bindings)
 
     case match(eval, left, right, bindings) do
       {:match, bindings} ->
@@ -735,15 +758,7 @@ defmodule EDS.Remote.Spy.Meta do
   defp eval_expr(eval, {:apply_fun, line, function, args, last_call?} = expr, bindings) do
     eval = Map.put(eval, :line, line)
 
-    func_value =
-      with {:value, {:dbg_apply, mfa}, bindings} <-
-             eval_expr(eval, function, bindings) do
-        eval
-        |> Map.put(:level, eval.level + 1)
-        |> host_cmd({:apply, mfa}, bindings)
-      end
-
-    case func_value do
+    case spy_expr(eval, function, bindings) do
       {:value, function, bindings} when is_function(function) ->
         {args, bindings} = eval_list(eval, args, bindings)
         eval_function(eval, {nil, function, args}, bindings, :external, last_call?)
@@ -779,7 +794,7 @@ defmodule EDS.Remote.Spy.Meta do
       eval
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
-      |> eval_expr(to, bindings)
+      |> spy_expr(to, bindings)
 
     valid_timeout? = fn
       x when is_integer(x) and x >= 0 -> true
@@ -810,8 +825,8 @@ defmodule EDS.Remote.Spy.Meta do
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
 
-    {:value, to, to_bindings} = eval_expr(eval, to, bindings)
-    {:value, message, message_bindings} = eval_expr(eval, message, bindings)
+    {:value, to, to_bindings} = spy_expr(eval, to, bindings)
+    {:value, message, message_bindings} = spy_expr(eval, message, bindings)
     eval = Map.put(eval, :top_level, true)
     bindings = merge_bindings(eval, message_bindings, to_bindings)
 
@@ -833,7 +848,7 @@ defmodule EDS.Remote.Spy.Meta do
       :eval_bits.expr_grp(
         fields,
         bindings,
-        &eval_expr(eval, &1, &2),
+        &spy_expr(eval, &1, &2),
         [],
         false
       )
@@ -866,7 +881,7 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   defp eval_list(eval, [element | elements], values, original_bindings, bindings) do
-    {:value, value, new_bindings} = eval_expr(eval, element, bindings)
+    {:value, value, new_bindings} = spy_expr(eval, element, bindings)
     merged_bindings = merge_bindings(eval, new_bindings, bindings)
     eval_list(eval, elements, [value | values], original_bindings, merged_bindings)
   end
@@ -876,7 +891,7 @@ defmodule EDS.Remote.Spy.Meta do
   end
 
   def eval_map_fields(eval, fields, bindings),
-    do: eval_map_fields(eval, fields, bindings, &eval_expr/3)
+    do: eval_map_fields(eval, fields, bindings, &spy_expr/3)
 
   defp eval_map_fields(eval, fields, bindings, eval_func) do
     {values, bindings} =
@@ -970,7 +985,7 @@ defmodule EDS.Remote.Spy.Meta do
       {:match, bindings} ->
         case guard(eval, guards, bindings) do
           true ->
-            Process.put(:exit_info, :undefined)
+            Process.put(:exit_info, nil)
             Stack.pop(eval.level)
             eval_exprs(eval, body, bindings)
 
@@ -1158,7 +1173,7 @@ defmodule EDS.Remote.Spy.Meta do
       eval
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
-      |> eval_expr(list, bindings)
+      |> spy_expr(list, bindings)
 
     comp_func = fn bindings ->
       eval
@@ -1176,7 +1191,7 @@ defmodule EDS.Remote.Spy.Meta do
       eval
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
-      |> eval_expr(list, bindings)
+      |> spy_expr(list, bindings)
 
     comp_func = fn bindings ->
       eval
@@ -1199,7 +1214,7 @@ defmodule EDS.Remote.Spy.Meta do
   defp eval_list_comprehension(eval, expr, [qualifier | qualifiers], bindings) do
     eval
     |> Map.put(:top_level, false)
-    |> eval_expr(qualifier, bindings)
+    |> spy_expr(qualifier, bindings)
     |> case do
       {:value, true, bindings} ->
         eval_list_comprehension(eval, expr, qualifiers, bindings)
@@ -1216,7 +1231,7 @@ defmodule EDS.Remote.Spy.Meta do
     {:value, value, _} =
       eval
       |> Map.put(:top_level, false)
-      |> eval_expr(expr, bindings)
+      |> spy_expr(expr, bindings)
 
     [value]
   end
@@ -1226,7 +1241,7 @@ defmodule EDS.Remote.Spy.Meta do
       eval
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
-      |> eval_expr(list, bindings)
+      |> spy_expr(list, bindings)
 
     comp_func = fn bindings ->
       eval
@@ -1244,7 +1259,7 @@ defmodule EDS.Remote.Spy.Meta do
       eval
       |> Map.put(:line, line)
       |> Map.put(:top_level, false)
-      |> eval_expr(list, bindings)
+      |> spy_expr(list, bindings)
 
     comp_func = fn bindings ->
       eval
@@ -1267,7 +1282,7 @@ defmodule EDS.Remote.Spy.Meta do
   defp eval_binary_comprehension(eval, expr, [qualifier | qualifiers], bindings) do
     eval
     |> Map.put(:top_level, false)
-    |> eval_expr(qualifier, bindings)
+    |> spy_expr(qualifier, bindings)
     |> case do
       {:value, true, bindings} ->
         eval_binary_comprehension(eval, expr, qualifiers, bindings)
@@ -1284,7 +1299,7 @@ defmodule EDS.Remote.Spy.Meta do
     {:value, value, _} =
       eval
       |> Map.put(:top_level, false)
-      |> eval_expr(expr, bindings)
+      |> spy_expr(expr, bindings)
 
     [value]
   end
@@ -1309,7 +1324,7 @@ defmodule EDS.Remote.Spy.Meta do
 
   defp binary_generate(eval, <<_::bitstring>> = binary, pattern, bindings, comp_func) do
     match_func = match_function(eval, bindings)
-    eval_func = &eval_expr(%Eval{}, &1, &2)
+    eval_func = &spy_expr(%Eval{}, &1, &2)
 
     pattern
     |> :eval_bits.bin_gen(binary, Bindings.new(), bindings, match_func, eval_func)
@@ -1523,7 +1538,7 @@ defmodule EDS.Remote.Spy.Meta do
     :erlang.raise(class, reason, [])
   end
 
-  def merge_bindings(eval, source, destination) do
+  defp merge_bindings(eval, source, destination) do
     case Bindings.merge(eval, source, destination) do
       {:error, variable, bindings} ->
         exception(eval, :error, "badmatch: #{variable}", bindings)
@@ -1533,7 +1548,7 @@ defmodule EDS.Remote.Spy.Meta do
     end
   end
 
-  def get_stacktrace() do
+  defp get_stacktrace() do
     case Process.get(:stacktrace) do
       make_stack when is_function(make_stack, 1) ->
         depth = :erlang.system_flag(:backtrace_depth, 8)
