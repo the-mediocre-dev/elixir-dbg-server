@@ -1,4 +1,4 @@
-# Elixir Development Server
+# Elixir Debug Server
 
 Run:
 
